@@ -1,5 +1,12 @@
 # PostureKit
 
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
+![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-96%20passing-brightgreen.svg)
+![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
+![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
+
 **Evidence-first, credentialed Windows and network security posture assessment.**
 
 PostureKit reads a fixed set of security-relevant facts from authorized Windows hosts, seals that
@@ -109,6 +116,13 @@ python Code/Tests.py
 ```
 
 The suite runs on synthetic data only - no PowerShell is executed and no host is contacted.
+
+## Contributing
+
+Issues and pull requests are welcome - new rule packs, additional importers, and coverage for more
+Windows versions are all good first contributions. Open an issue to discuss anything larger.
+
+If PostureKit is useful to you, a ⭐ helps others find it.
 
 ## License
 
