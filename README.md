@@ -14,7 +14,7 @@ evidence so it cannot be tampered with, and evaluates it against a transparent r
 in adjacent planes - patch state, wireless configuration, and network vulnerability scans - through
 importers. It identifies and reports; it does not exploit, and it never assigns severity on its own.
 
-![Architecture](docs/architecture.svg)
+![Architecture](docs/architecture.png)
 
 ---
 
