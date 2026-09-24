@@ -15,6 +15,10 @@ importers. It identifies and reports; it does not exploit, and it never assigns 
 
 ![Architecture](docs/architecture.png)
 
+## See it work without collecting from your computer
+
+Run `python examples/offline_demo.py` for a synthetic **Pass / Fail / Unknown** example using the real analyzer. It produces an HTML report and verifies its hashes; no host or network is contacted. [View the worked demonstration](examples/README.md).
+
 ---
 
 ## Why it exists

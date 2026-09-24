@@ -1,0 +1,8 @@
+SYNTHETIC OFFLINE DEMO - no real hosts queried
+Rule: RequireSecuritySignature must equal true
+DEMO-PASS      Pass
+DEMO-FAIL      Fail
+DEMO-UNKNOWN   Unknown
+Analyzer exit: 3 (missing value remains unresolved)
+Report manifest: verified
+No severity or exploitability is inferred.
