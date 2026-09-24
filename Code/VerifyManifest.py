@@ -25,6 +25,7 @@ def main():
         actual=sha(p)
         if actual.lower()!=expected.lower(): print(f'{name}: HASH MISMATCH');bad+=1
         else: print(f'{name}: OK')
+    if not seen: print('Manifest contains no evidence entries'); bad+=1
     actual_files={p.name for p in d.iterdir() if p.is_file() and not p.is_symlink() and p.name!='Manifest.txt'}
     extras=sorted(actual_files-seen)
     for name in extras: print(f'{name}: UNMANIFESTED'); bad+=1

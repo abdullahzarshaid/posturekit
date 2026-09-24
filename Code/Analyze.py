@@ -898,7 +898,7 @@ def main() -> int:
         write_csv(args.output/'Artifacts.csv', artifacts, ['file','sha256','kind','asset_id'])
         package = {'schema_version':'1.0','tool_version':VERSION,'evidence_kind':'NormalizedAssessmentEvidence',
                    'metadata':meta,'coverage':assets,'tests':tests,'artifacts':artifacts,
-                   'downstream_notice':'Suitable as structured input for approved the approved reporting workflow. Raw evidence, analyst validation and engagement scope remain authoritative.'}
+                   'downstream_notice':'Suitable as structured input for the approved reporting workflow. Raw evidence, analyst validation and engagement scope remain authoritative.'}
         (args.output/'Evidence.json').write_text(json.dumps(package, indent=2, ensure_ascii=False), encoding='utf-8')
         (args.output/'Summary.html').write_text(render_html(assets, tests, meta), encoding='utf-8')
         hashes=[]

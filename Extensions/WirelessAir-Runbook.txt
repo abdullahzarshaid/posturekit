@@ -2,8 +2,9 @@ WIRELESS LAYER B - OVER-THE-AIR CAPTURE RUNBOOK
 
 WHAT THIS IS
 The over-the-air layer looks for rogue and evil-twin access points, open and hidden
-SSIDs, WPS exposure and guest-to-corporate bleed. Radio does not travel over a
-network, so this layer is done ON SITE with a monitor-mode adapter. The toolkit does
+SSIDs and WPS exposure. Passive AP inventory does not prove guest-to-corporate
+segmentation; test that separately through authorized traffic paths. This layer is
+done ON SITE with a monitor-mode adapter. The toolkit does
 not transmit or capture radio; it imports the capture files you produce here.
 
 AUTHORIZATION - READ FIRST
@@ -21,6 +22,9 @@ HARDWARE
 - A Linux host (Kali or similar). None of this runs on Windows.
 
 STEP 1 - MONITOR MODE
+  Use a dedicated interface. These commands may stop networking services and
+  disconnect the machine: do not use the interface carrying remote administration.
+  Record the original interface state before changing it.
   sudo airmon-ng check kill
   sudo airmon-ng start wlan0
   (adapter appears as wlan0mon)
@@ -63,6 +67,9 @@ OPTIONAL - EVIL-TWIN / 802.1X CREDENTIAL EXPOSURE (active, authorization require
   proof, not as harvested live credentials.
 
 LIMITS
+- These commands cover 2.4/5 GHz, not 6 GHz; report unassessed bands explicitly.
+- Afterwards stop monitor mode and restore the original interface configuration
+  and networking services, then verify connectivity locally.
 - One position and time window; absence of a rogue is not proof there is none.
 - Rogue classification is only as good as the authorized allowlist.
 - 2.4-GHz-only adapters, and adapters without monitor mode, cannot do this layer.

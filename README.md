@@ -3,14 +3,14 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-96%20passing-brightgreen.svg)
+[![Tests](https://github.com/abdullahzarshaid/posturekit/actions/workflows/tests.yml/badge.svg)](https://github.com/abdullahzarshaid/posturekit/actions/workflows/tests.yml)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 ![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
 **Evidence-first, credentialed Windows and network security posture assessment.**
 
-PostureKit reads a fixed set of security-relevant facts from authorized Windows hosts, seals that
-evidence so it cannot be tampered with, and evaluates it against a transparent rule set. It also folds
+PostureKit reads a fixed set of security-relevant facts from authorized Windows hosts, records their
+hashes for later integrity checks, and evaluates them against a transparent rule set. It also folds
 in adjacent planes - patch state, wireless configuration, and network vulnerability scans - through
 importers. It identifies and reports; it does not exploit, and it never assigns severity on its own.
 
@@ -25,8 +25,8 @@ evidence trail. PostureKit is deliberately the opposite:
 
 - **Deterministic, no black box.** Every result comes from a named check against a value the tool read
   from the host. There is no machine-learning guess in the evidence path.
-- **Tamper-evident evidence.** Every collection is sealed with a SHA-256 manifest. If a file is altered,
-  verification fails and the analyzer refuses it.
+- **Integrity checks.** Changed files fail verification against the retained SHA-256 manifest.
+  Keep a trusted copy separately: hashes do not authenticate a manifest replaced alongside the evidence.
 - **Honest by design.** A check that cannot be completed is recorded as inconclusive, never as secure.
   Severity is always left to an analyst. The tool distinguishes what was *observed* from what is
   *inferred*.
@@ -62,6 +62,15 @@ hash, the method, and the outcome.
 - **Python 3.10+** on the machine you analyze from (standard library only - no third-party packages).
 
 ## Quick start
+
+```bash
+git clone https://github.com/abdullahzarshaid/posturekit.git
+cd posturekit
+python Code/Tests.py
+```
+
+These tests use synthetic fixtures and do not contact hosts. Actual collection below requires
+a reviewed scope file and authorization; use an asset identifier declared in that scope.
 
 ```powershell
 # 1. Describe the target(s) in a scope file (see Code/ScopeWorkgroup.example.json).
