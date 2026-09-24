@@ -1,0 +1,56 @@
+NETWORK VULNERABILITY SCANNING - GREENBONE / GVM RUNBOOK
+
+WHAT THIS IS
+The internal and external network vulnerability assessment scope. holds no
+commercial scanner licence and does not need one: Greenbone Community Edition (GVM)
+is free, unlimited, and updated daily. The toolkit does not run or ship a scanner;
+GreenboneImport.py normalizes a report you export from your own authorized GVM
+instance so it lands in the same evidence and reporting pipeline as everything else.
+
+AUTHORIZATION
+- Only against hosts and ranges named in the signed scope. A vulnerability scan is
+  intrusive traffic; confirm the window and notify the client's operations/SOC.
+- Scan from the agreed position: internal scope from the internal sensor (the Kali
+  device on the user or server VLAN), external scope from an authorized outside host.
+
+STEP 1 - STAND UP GREENBONE (once)
+  On Kali:  sudo apt update && sudo apt install gvm && sudo gvm-setup
+  Then:     sudo gvm-check-setup   (must end "It seems like your GVM-... is OK")
+  Start:    sudo gvm-start   (web UI on https://127.0.0.1:9392)
+  Let the vulnerability feed finish syncing before the first scan.
+
+STEP 2 - RUN AN AUTHORIZED SCAN
+  In the GVM web UI: create a Target (the in-scope hosts/ranges), then a Task using
+  a standard scan config (e.g. "Full and fast"). Run it. For a credentialed scan,
+  attach the client-approved credentials to the Target.
+
+STEP 3 - EXPORT THE REPORT AS XML
+  Open the finished report and export it in the Anonymous/Full XML format. Save the
+  .xml file. (Command line alternative: gvmd/gvm-cli get_reports with format=XML.)
+
+STEP 4 - NORMALIZE INTO EVIDENCE
+  python Extensions/GreenboneImport.py \
+    --input report.xml \
+    --engagement <ENGAGEMENT-ID> \
+    --source-position "Internal sensor, user LAN" \
+    --output GreenboneEvidence.json
+
+STEP 5 - FOLD INTO THE ASSESSMENT
+  python Code/Analyze.py --batch <host-batch> --greenbone GreenboneEvidence.json \
+    --output <report-dir>
+  High/Medium/Low results appear as VULN.* Candidates that an assessor confirms
+  before reporting; informational rows are observations. The scanner's CVSS and CVE
+  references are preserved, but severity is assigned by the assessor from the
+  confirmed impact, never inherited from the scanner.
+
+WHY CANDIDATES, NOT FINDINGS
+A network scanner detects exposure; it does not prove exploitability. Treating every
+scanner row as a finding is how reports get padded with false positives. Each
+Candidate is correlated with the host evidence and manual testing before it becomes
+a finding, which is what keeps the report defensible.
+
+LIMITS
+- One scanning position and one point in time; coverage depends on the feed and scan
+  config. False positives and false negatives are both possible.
+- This is the network plane. Windows host configuration and patch state are the host
+  toolkit; web and API are Burp; wireless is the wireless layers.

@@ -1,0 +1,13 @@
+category,item,response,evidence_or_reference,owner,status,notes
+Scope,Authorized sites/ranges/VLANs,,,,Open,
+Topology,Subnets VLANs VRFs gateways routes firewalls ACLs NAT IPv6,,,,Open,
+Identity,AD domains forests trusts domain controllers,,,,Open,
+Endpoints,Windows macOS Linux network devices appliances media systems,,,,Open,
+Management,Configuration Manager Intune RMM EDR software deployment,,,,Open,
+Scanning,Existing Tenable Qualys Rapid7 Defender VM Greenbone or other,,,,Open,
+Passive,Firewall DNS DHCP NetFlow IPFIX SIEM SPAN TAP telemetry,,,,Open,
+Segmentation,Expected source-zone to destination-zone policy,,,,Open,
+Operations,Critical or no-scan systems blackout windows stop contact,,,,Open,
+Credentials,Approved least-privilege accounts or scanner credentials,,,,Open,
+ApplicationControl,WDAC AppLocker PowerShell policy EDR restrictions,,,,Open,
+Evidence,Storage transfer encryption retention data handling,,,,Open,

@@ -1,0 +1,5 @@
+{
+  "_comment": "Wireless Layer B authorized-access-point allowlist. Fill from the client's own inventory of legitimate corporate SSIDs and the BSSIDs (radio MACs) of their sanctioned access points. WirelessAirImport.py flags any radio broadcasting a corporate ESSID whose BSSID is NOT listed here as a rogue/evil-twin candidate. An incomplete list produces false rogue findings, so confirm it with the client before the capture.",
+  "corporate_essids": ["Corp-Example", "Corp-Example-Guest"],
+  "authorized_bssids": ["aa:aa:aa:aa:aa:01", "aa:aa:aa:aa:aa:02"]
+}

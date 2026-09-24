@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 460" font-family="Segoe UI, Arial, sans-serif">
+  <rect x="0" y="0" width="920" height="460" fill="#ffffff"/>
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#5a6478"/>
+    </marker>
+  </defs>
+  <text x="30" y="34" font-size="18" font-weight="700" fill="#0f3d73">PostureKit - assessment pipeline</text>
+  <text x="30" y="54" font-size="11.5" fill="#5a6478">Evidence-first credentialed Windows and network security posture assessment</text>
+
+  <!-- INPUT -->
+  <rect x="30" y="86" width="180" height="54" rx="6" fill="#eef1f6" stroke="#c4ccda"/>
+  <text x="120" y="110" text-anchor="middle" font-size="12.5" font-weight="600" fill="#14203a">Authorized host</text>
+  <text x="120" y="127" text-anchor="middle" font-size="10.5" fill="#5a6478">in the signed scope</text>
+  <line x1="210" y1="113" x2="256" y2="113" stroke="#5a6478" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- ENGINE -->
+  <rect x="26" y="164" width="868" height="128" rx="8" fill="#f4f7fb" stroke="#d5dae4"/>
+  <text x="44" y="186" font-size="12.5" font-weight="700" fill="#1d6b3a">THE ENGINE  (deterministic, no black box)</text>
+
+  <rect x="260" y="86" width="170" height="54" rx="6" fill="#e2f1e7" stroke="#1d6b3a"/>
+  <text x="345" y="107" text-anchor="middle" font-size="12.5" font-weight="700" fill="#14203a">1. Collect</text>
+  <text x="345" y="124" text-anchor="middle" font-size="10.5" fill="#2d3b57">45 sources, read-only</text>
+  <line x1="345" y1="140" x2="345" y2="204" stroke="#5a6478" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <rect x="60" y="212" width="176" height="60" rx="6" fill="#e2f1e7" stroke="#1d6b3a"/>
+  <text x="148" y="236" text-anchor="middle" font-size="12.5" font-weight="700" fill="#14203a">2. Seal + hash</text>
+  <text x="148" y="253" text-anchor="middle" font-size="10.5" fill="#2d3b57">SHA-256 manifest</text>
+
+  <rect x="266" y="212" width="176" height="60" rx="6" fill="#e2f1e7" stroke="#1d6b3a"/>
+  <text x="354" y="236" text-anchor="middle" font-size="12.5" font-weight="700" fill="#14203a">3. Verify</text>
+  <text x="354" y="253" text-anchor="middle" font-size="10.5" fill="#2d3b57">reject if altered</text>
+
+  <rect x="472" y="212" width="196" height="60" rx="6" fill="#e2f1e7" stroke="#1d6b3a"/>
+  <text x="570" y="233" text-anchor="middle" font-size="12.5" font-weight="700" fill="#14203a">4. Analyze</text>
+  <text x="570" y="250" text-anchor="middle" font-size="10.5" fill="#2d3b57">45 rules + importers</text>
+
+  <rect x="698" y="212" width="176" height="60" rx="6" fill="#f4f7fb" stroke="#0f3d73"/>
+  <text x="786" y="233" text-anchor="middle" font-size="12.5" font-weight="700" fill="#0f3d73">5. Report</text>
+  <text x="786" y="250" text-anchor="middle" font-size="10.5" fill="#2d3b57">findings + evidence</text>
+
+  <line x1="345" y1="242" x2="240" y2="242" stroke="#5a6478" stroke-width="1.5" marker-end="url(#ar)"/>
+  <line x1="236" y1="242" x2="262" y2="242" stroke="#5a6478" stroke-width="1.5" marker-end="url(#ar)"/>
+  <line x1="442" y1="242" x2="468" y2="242" stroke="#5a6478" stroke-width="1.5" marker-end="url(#ar)"/>
+  <line x1="668" y1="242" x2="694" y2="242" stroke="#5a6478" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- IMPORTERS -->
+  <text x="30" y="340" font-size="12.5" font-weight="700" fill="#3a4a66">IMPORTERS  (folded into Analyze)</text>
+  <rect x="30" y="352" width="200" height="46" rx="5" fill="#eef1f6" stroke="#c4ccda"/>
+  <text x="130" y="371" text-anchor="middle" font-size="11" font-weight="600" fill="#14203a">Patch / software</text>
+  <text x="130" y="387" text-anchor="middle" font-size="9.5" fill="#5a6478">missing updates, EOL</text>
+
+  <rect x="246" y="352" width="200" height="46" rx="5" fill="#eef1f6" stroke="#c4ccda"/>
+  <text x="346" y="371" text-anchor="middle" font-size="11" font-weight="600" fill="#14203a">Wireless</text>
+  <text x="346" y="387" text-anchor="middle" font-size="9.5" fill="#5a6478">host, over-the-air, controller</text>
+
+  <rect x="462" y="352" width="210" height="46" rx="5" fill="#eef1f6" stroke="#c4ccda"/>
+  <text x="567" y="371" text-anchor="middle" font-size="11" font-weight="600" fill="#14203a">Network vulnerability</text>
+  <text x="567" y="387" text-anchor="middle" font-size="9.5" fill="#5a6478">Greenbone / OpenVAS import</text>
+
+  <rect x="688" y="352" width="186" height="46" rx="5" fill="#eef1f6" stroke="#c4ccda"/>
+  <text x="781" y="371" text-anchor="middle" font-size="11" font-weight="600" fill="#14203a">Network reachability</text>
+  <text x="781" y="387" text-anchor="middle" font-size="9.5" fill="#5a6478">segmentation vantage</text>
+
+  <line x1="450" y1="352" x2="520" y2="278" stroke="#9aa6b6" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#ar)"/>
+
+  <text x="30" y="432" font-size="10.5" fill="#5a6478">Assessment and identification only - it does not exploit, and severity is always assigned by an analyst.</text>
+</svg>

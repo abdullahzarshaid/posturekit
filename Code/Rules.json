@@ -1,0 +1,1153 @@
+﻿{
+  "schema_version": "1.0",
+  "profile_id": "LAB-REFERENCE-03",
+  "notice": "Illustrative lab reference conditions only. Not a CIS or Microsoft certification and not a client-approved benchmark. A Fail is a configuration observation that requires analyst review against the client's approved baseline and documented exceptions before it becomes a finding. Where a value is absent, the rule states explicitly what that absence means; no default is ever assumed silently. Severity is never assigned by this rule set.",
+  "rules": [
+    {
+      "id": "FW01",
+      "title": "Domain firewall profile enabled",
+      "phase": "host_configuration",
+      "category": "firewall",
+      "source": "firewall",
+      "selector": {
+        "Name": "Domain"
+      },
+      "field": "Enabled",
+      "type": "enum_bool",
+      "expected": true,
+      "basis": "Microsoft security-baseline review required for the exact OS/build",
+      "applicability": "Applicable only where the Domain profile exists and the approved baseline expects it enabled.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-7",
+          "control_title": "Boundary Protection"
+        }
+      ]
+    },
+    {
+      "id": "FW02",
+      "title": "Private firewall profile enabled",
+      "phase": "host_configuration",
+      "category": "firewall",
+      "source": "firewall",
+      "selector": {
+        "Name": "Private"
+      },
+      "field": "Enabled",
+      "type": "enum_bool",
+      "expected": true,
+      "basis": "Microsoft security-baseline review required for the exact OS/build",
+      "applicability": "Verify profile use and approved exceptions.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-7",
+          "control_title": "Boundary Protection"
+        }
+      ]
+    },
+    {
+      "id": "FW03",
+      "title": "Public firewall profile enabled",
+      "phase": "host_configuration",
+      "category": "firewall",
+      "source": "firewall",
+      "selector": {
+        "Name": "Public"
+      },
+      "field": "Enabled",
+      "type": "enum_bool",
+      "expected": true,
+      "basis": "Microsoft security-baseline review required for the exact OS/build",
+      "applicability": "Verify profile use and approved exceptions.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-7",
+          "control_title": "Boundary Protection"
+        }
+      ]
+    },
+    {
+      "id": "SMB01",
+      "title": "SMB server configuration disables SMB1",
+      "phase": "host_configuration",
+      "category": "smb",
+      "source": "smbserver",
+      "field": "EnableSMB1Protocol",
+      "type": "bool",
+      "expected": false,
+      "basis": "Lab security reference; validate against the applicable Microsoft baseline",
+      "applicability": "Verify the feature/provider exists on the assessed OS and whether a documented legacy exception applies.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "CM-7",
+          "control_title": "Least Functionality"
+        }
+      ]
+    },
+    {
+      "id": "SMB02",
+      "title": "SMB server configuration requires signing",
+      "phase": "host_configuration",
+      "category": "smb",
+      "source": "smbserver",
+      "field": "RequireSecuritySignature",
+      "type": "bool",
+      "expected": true,
+      "basis": "Lab reference only; OS/role baseline must be confirmed",
+      "applicability": "Do not report solely from this rule until the target OS/role and approved baseline are confirmed.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-8",
+          "control_title": "Transmission Confidentiality and Integrity"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-23",
+          "control_title": "Session Authenticity"
+        }
+      ]
+    },
+    {
+      "id": "SMB03",
+      "title": "SMB client configuration requires signing",
+      "phase": "host_configuration",
+      "category": "smb",
+      "source": "smbclient",
+      "field": "RequireSecuritySignature",
+      "type": "bool",
+      "expected": true,
+      "basis": "Lab reference only; OS/role baseline must be confirmed",
+      "applicability": "Do not report solely from this rule until the target OS/role and approved baseline are confirmed.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-8",
+          "control_title": "Transmission Confidentiality and Integrity"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-23",
+          "control_title": "Session Authenticity"
+        }
+      ]
+    },
+    {
+      "id": "RDP01",
+      "title": "NLA configured when RDP connections are enabled",
+      "phase": "host_configuration",
+      "category": "rdp",
+      "source": "rdp",
+      "field": "UserAuthenticationRequired",
+      "type": "int",
+      "expected": 1,
+      "gate": {
+        "field": "AllowTSConnections",
+        "enabled": 1,
+        "disabled": 0
+      },
+      "basis": "Lab security reference; validate against the exact OS baseline",
+      "applicability": "Only evaluates the local RDP configuration provider. It does not prove the port is reachable from another network.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-17",
+          "control_title": "Remote Access"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-2",
+          "control_title": "Identification and Authentication (Organizational Users)"
+        }
+      ]
+    },
+    {
+      "id": "UAC01",
+      "title": "EnableLUA configured as 1",
+      "phase": "host_configuration",
+      "category": "uac",
+      "source": "uac",
+      "field": "EnableLUA",
+      "type": "int",
+      "expected": 1,
+      "basis": "Lab security reference; validate against the exact OS baseline",
+      "applicability": "A registry value alone does not establish every UAC-related control or pending-restart state.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-6",
+          "control_title": "Least Privilege"
+        }
+      ]
+    },
+    {
+      "id": "SAM01",
+      "title": "Built-in local Guest account disabled",
+      "phase": "host_configuration",
+      "category": "accounts",
+      "source": "localguest",
+      "field": "Enabled",
+      "type": "bool",
+      "expected": false,
+      "basis": "Lab security reference; validate against the exact OS baseline",
+      "applicability": "Not used as a domain-controller directory assessment. The collector selects the built-in local Guest by RID.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-2",
+          "control_title": "Account Management"
+        }
+      ]
+    },
+    {
+      "id": "CRED01",
+      "title": "WDigest does not cache cleartext credentials",
+      "category": "credential_protection",
+      "source": "wdigest",
+      "field": "UseLogonCredential",
+      "type": "int",
+      "expected": 0,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "VERSION DEPENDENT. On Windows 8.1, Server 2012 R2 and later an absent value means cleartext caching is off. On Windows 7, Server 2008 R2, Windows 8 and Server 2012 with KB2871997 installed, an absent value means cleartext caching is ON. Confirm the host version before reading an absent value as safe.",
+      "absent_means": {
+        "result": "Unknown",
+        "interpretation": "No value is configured. The effective behaviour depends on the operating system version, so no determination is made here. On Windows 8.1 and later the default is safe; on earlier versions with KB2871997 it is not."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        }
+      ]
+    },
+    {
+      "id": "CRED02",
+      "title": "LSA runs as a protected process",
+      "category": "credential_protection",
+      "source": "lsa",
+      "field": "RunAsPPL",
+      "type": "int_any",
+      "expected": [
+        1,
+        2
+      ],
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "RunAsPPL 1 and 2 both enable LSA protection; 2 is the form without the UEFI variable lock, available on Windows 11 22H2 and later. Either value satisfies this check.",
+      "absent_means": {
+        "result": "Fail",
+        "interpretation": "No LSA protection value is configured, so LSASS is not running as a protected process and its memory is exposed to credential theft tooling."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-39",
+          "control_title": "Process Isolation"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        }
+      ]
+    },
+    {
+      "id": "CRED03",
+      "title": "LAN Manager password hashes are not stored",
+      "category": "credential_protection",
+      "source": "lsa",
+      "field": "NoLMHash",
+      "type": "int",
+      "expected": 1,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Applies to all supported Windows versions.",
+      "absent_means": {
+        "result": "Fail",
+        "interpretation": "No value is configured, so LAN Manager hash storage is not explicitly disabled and legacy weak hashes may be retained."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-13",
+          "control_title": "Cryptographic Protection"
+        }
+      ]
+    },
+    {
+      "id": "CRED04",
+      "title": "Cached interactive logons are limited",
+      "category": "credential_protection",
+      "source": "logonpolicy",
+      "field": "CachedLogonsCount",
+      "type": "numeric_max",
+      "expected": 4,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Compare against the client's approved value. A higher count is a configuration observation, not a confirmed exposure; the appropriate number depends on how often the host operates offline.",
+      "absent_means": {
+        "result": "Unknown",
+        "interpretation": "No value is present; the effective default cannot be confirmed from this evidence alone."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        }
+      ]
+    },
+    {
+      "id": "CRED05",
+      "title": "Automatic logon is not configured",
+      "category": "credential_protection",
+      "source": "logonpolicy",
+      "field": "AutoAdminLogon",
+      "type": "string",
+      "expected": "0",
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Where automatic logon is enabled, confirm separately whether a password is stored in the registry.",
+      "absent_means": {
+        "result": "Pass",
+        "interpretation": "No automatic-logon value is configured, so interactive authentication is required."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-2",
+          "control_title": "Account Management"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-2",
+          "control_title": "Identification and Authentication (Organizational Users)"
+        }
+      ]
+    },
+    {
+      "id": "CRED06",
+      "title": "No automatic-logon password is stored in the registry",
+      "category": "credential_protection",
+      "source": "logonpolicy",
+      "field": "DefaultPasswordIsPresent",
+      "type": "bool",
+      "expected": false,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "The collector records only whether a stored password exists; the value itself is never collected.",
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        }
+      ]
+    },
+    {
+      "id": "CRED07",
+      "title": "A local administrator password solution is present on the host",
+      "category": "credential_protection",
+      "source": "laps",
+      "field": "AnyLapsConfigured",
+      "type": "bool",
+      "expected": true,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Presence only. This records that LAPS components or a configuration root exist; it does NOT establish that password backup is configured. CRED08 tests the determining value.",
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-2",
+          "control_title": "Account Management"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        }
+      ]
+    },
+    {
+      "id": "NET01",
+      "title": "LLMNR is disabled by policy",
+      "category": "name_resolution",
+      "source": "nameresolution",
+      "field": "LlmnrEnableMulticast",
+      "type": "int",
+      "expected": 0,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Disabling LLMNR can affect name resolution on flat networks. Confirm operational impact with the client.",
+      "absent_means": {
+        "result": "Fail",
+        "interpretation": "No policy is configured, so LLMNR remains enabled by default and the host will respond to multicast name queries, which permits credential relay and spoofing on the local segment."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-20",
+          "control_title": "Secure Name/Address Resolution Service (Authoritative Source)"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-7",
+          "control_title": "Boundary Protection"
+        }
+      ]
+    },
+    {
+      "id": "SMB04",
+      "title": "The SMBv1 client driver is disabled",
+      "category": "smb",
+      "source": "smb1driver",
+      "field": "Mrxsmb10Start",
+      "type": "int",
+      "expected": 4,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Complements the server-side SMB1 setting. A start value of 4 is disabled.",
+      "absent_means": {
+        "result": "Unknown",
+        "interpretation": "The driver key is not present; the SMBv1 client state cannot be determined from this evidence."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "CM-7",
+          "control_title": "Least Functionality"
+        }
+      ]
+    },
+    {
+      "id": "PRIV01",
+      "title": "Windows Installer does not always install with elevated privileges (machine policy)",
+      "category": "privilege_escalation",
+      "source": "installerpolicy",
+      "field": "MachineAlwaysInstallElevated",
+      "type": "int",
+      "expected": 0,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Exploitable only when the matching user-side policy is also enabled. A single side set to 1 is a configuration weakness, not a confirmed escalation path.",
+      "absent_means": {
+        "result": "Pass",
+        "interpretation": "No policy is configured, so the setting is disabled by default."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-6",
+          "control_title": "Least Privilege"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "CM-11",
+          "control_title": "User-Installed Software"
+        }
+      ]
+    },
+    {
+      "id": "PRIV02",
+      "title": "Windows Installer does not always install with elevated privileges (user policy)",
+      "category": "privilege_escalation",
+      "source": "installerpolicy",
+      "field": "UserAlwaysInstallElevated",
+      "type": "int",
+      "expected": 0,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Reflects the account that performed the collection only, not every user of the host.",
+      "absent_means": {
+        "result": "Pass",
+        "interpretation": "No policy is configured for the collecting account, so the setting is disabled by default."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-6",
+          "control_title": "Least Privilege"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "CM-11",
+          "control_title": "User-Installed Software"
+        }
+      ]
+    },
+    {
+      "id": "LOG01",
+      "title": "PowerShell script block logging is enabled",
+      "category": "audit_logging",
+      "source": "powershelllogging",
+      "field": "EnableScriptBlockLogging",
+      "type": "int",
+      "expected": 1,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Absence reduces detection and forensic capability. It is not itself an exploitable weakness.",
+      "absent_means": {
+        "result": "Fail",
+        "interpretation": "No policy is configured, so PowerShell script block logging is not enabled and script execution will not be recorded for investigation."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AU-2",
+          "control_title": "Event Logging"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AU-12",
+          "control_title": "Audit Record Generation"
+        }
+      ]
+    },
+    {
+      "id": "LOG02",
+      "title": "PowerShell module logging is enabled",
+      "category": "audit_logging",
+      "source": "powershelllogging",
+      "field": "EnableModuleLogging",
+      "type": "int",
+      "expected": 1,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Detection capability. Confirm the client's logging strategy before reporting.",
+      "absent_means": {
+        "result": "Fail",
+        "interpretation": "No policy is configured, so PowerShell module logging is not enabled."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AU-2",
+          "control_title": "Event Logging"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AU-12",
+          "control_title": "Audit Record Generation"
+        }
+      ]
+    },
+    {
+      "id": "UAC02",
+      "title": "Administrator approval mode is enforced for the built-in administrator",
+      "category": "uac",
+      "source": "uacpolicy",
+      "field": "FilterAdministratorToken",
+      "type": "int",
+      "expected": 1,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Applies where a built-in administrator account is in use.",
+      "absent_means": {
+        "result": "Fail",
+        "interpretation": "No policy is configured, so the built-in administrator account operates with a full token and is not subject to User Account Control prompting."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-6",
+          "control_title": "Least Privilege"
+        }
+      ]
+    },
+    {
+      "id": "UAC03",
+      "title": "Remote local-account access is not exempted from UAC filtering",
+      "category": "uac",
+      "source": "uacpolicy",
+      "field": "LocalAccountTokenFilterPolicy",
+      "type": "int",
+      "expected": 0,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "A value of 1 permits local accounts to be used for full-privilege remote administration, which also enables lateral movement between hosts sharing a password.",
+      "absent_means": {
+        "result": "Pass",
+        "interpretation": "No policy is configured, so remote local-account access remains filtered by default."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-6",
+          "control_title": "Least Privilege"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-17",
+          "control_title": "Remote Access"
+        }
+      ]
+    },
+    {
+      "id": "PWD01",
+      "title": "A minimum local password length is enforced",
+      "category": "account_policy",
+      "source": "passwordpolicy",
+      "field": "MinimumPasswordLength",
+      "type": "numeric_min",
+      "expected": 14,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Local accounts only; domain policy is not represented in this evidence. The value is parsed from English-language output, so on a non-English host this check must be treated as not tested.",
+      "absent_means": {
+        "result": "Unknown",
+        "interpretation": "The policy value could not be read, most likely because the host is not English-language. No determination is made."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        }
+      ]
+    },
+    {
+      "id": "PWD02",
+      "title": "An account lockout threshold is configured",
+      "category": "account_policy",
+      "source": "passwordpolicy",
+      "field": "LockoutThreshold",
+      "type": "numeric_between",
+      "expected": [
+        1,
+        5
+      ],
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Local accounts only. A threshold of 0 disables lockout entirely and is weaker than any positive value, which is why this check declares a range rather than a maximum. Compare the upper bound against the client's approved policy.",
+      "absent_means": {
+        "result": "Unknown",
+        "interpretation": "The policy value could not be read. No determination is made."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-7",
+          "control_title": "Unsuccessful Logon Attempts"
+        }
+      ]
+    },
+    {
+      "id": "MEDIA01",
+      "title": "AutoRun is restricted for all drive types",
+      "category": "removable_media",
+      "source": "autorunpolicy",
+      "field": "NoDriveTypeAutoRun",
+      "type": "numeric_min",
+      "expected": 255,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "255 disables AutoRun on every drive type. Lower values restrict it partially.",
+      "absent_means": {
+        "result": "Fail",
+        "interpretation": "No policy is configured, so AutoRun restriction relies on the operating system default and removable media handling is not explicitly controlled."
+      },
+      "phase": "host_configuration",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "MP-7",
+          "control_title": "Media Use"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "CM-7",
+          "control_title": "Least Functionality"
+        }
+      ]
+    },
+    {
+      "id": "UPD01",
+      "title": "Windows Update source is not an unencrypted server",
+      "category": "patch_management",
+      "source": "updatesource",
+      "field": "WUServerScheme",
+      "type": "string",
+      "expected": "https",
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Only meaningful when UseWUServer is 1. An update server reached over http allows an attacker on the network path to supply content that installs with SYSTEM privileges. Confirm UseWUServer before reporting.",
+      "absent_means": {
+        "result": "Not applicable",
+        "interpretation": "No update server is configured, so the host uses Microsoft Update directly and this check does not apply."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SI-2",
+          "control_title": "Flaw Remediation"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-8",
+          "control_title": "Transmission Confidentiality and Integrity"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "UPD02",
+      "title": "Update server certificate pinning is not disabled",
+      "category": "patch_management",
+      "source": "updatesource",
+      "field": "TlsPinningDisabled",
+      "type": "int",
+      "expected": 0,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Disabling enterprise certificate pinning for update detection reverses a Microsoft hardening measure.",
+      "absent_means": {
+        "result": "Pass",
+        "interpretation": "No policy is configured, so certificate pinning remains at its default enabled state."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-8",
+          "control_title": "Transmission Confidentiality and Integrity"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "PRN01",
+      "title": "Printer driver installation is restricted to administrators",
+      "category": "privilege_escalation",
+      "source": "pointandprint",
+      "field": "RestrictDriverInstallationToAdministrators",
+      "type": "int",
+      "expected": 1,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Microsoft states that no combination of other mitigations is equivalent to this setting. Applies wherever the print spooler is running.",
+      "absent_means": {
+        "result": "Fail",
+        "interpretation": "No policy is configured, so non-administrators may install printer drivers, which execute with system privileges."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-6",
+          "control_title": "Least Privilege"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "CM-11",
+          "control_title": "User-Installed Software"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "PRN02",
+      "title": "Point and Print does not suppress elevation prompts",
+      "category": "privilege_escalation",
+      "source": "pointandprint",
+      "field": "NoWarningNoElevationOnInstall",
+      "type": "int",
+      "expected": 0,
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "Suppressing the elevation prompt removes the only user-visible control on driver installation.",
+      "absent_means": {
+        "result": "Pass",
+        "interpretation": "No policy is configured, so the default prompting behaviour applies."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-6",
+          "control_title": "Least Privilege"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "WRM01",
+      "title": "Remote management service does not permit unencrypted traffic",
+      "category": "remote_management",
+      "source": "winrmconfig",
+      "field": "ServiceAllowUnencryptedTraffic",
+      "type": "int",
+      "expected": 0,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Read together with basic authentication. The two combined place credentials on the wire in clear.",
+      "absent_means": {
+        "result": "Pass",
+        "interpretation": "No policy is configured, so unencrypted transport is not permitted by default."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-8",
+          "control_title": "Transmission Confidentiality and Integrity"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "WRM02",
+      "title": "Remote management service does not permit basic authentication",
+      "category": "remote_management",
+      "source": "winrmconfig",
+      "field": "ServiceAllowBasic",
+      "type": "int",
+      "expected": 0,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Basic authentication transmits credentials in a reversible encoding. Significance depends on whether the transport is encrypted.",
+      "absent_means": {
+        "result": "Pass",
+        "interpretation": "No policy is configured, so basic authentication is not permitted by default."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "NET02",
+      "title": "NetBIOS over TCP/IP is disabled on every interface",
+      "category": "name_resolution",
+      "source": "nameresolution",
+      "field": "NetbiosInterfaces",
+      "type": "string",
+      "expected": "",
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Evaluated by the analyst per interface: a NetbiosOptions value of 2 is disabled, while 0 and 1 both leave it enabled. Every interface must be checked, not only the primary one.",
+      "absent_means": {
+        "result": "Unknown",
+        "interpretation": "No interface records were read, so no determination is made."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-20",
+          "control_title": "Secure Name/Address Resolution Service (Authoritative Source)"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "CRED08",
+      "title": "Managed local administrator password backup is configured",
+      "category": "credential_protection",
+      "source": "lapsconfig",
+      "field": "BackupDirectory",
+      "type": "int_any",
+      "expected": [
+        1,
+        2
+      ],
+      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "applicability": "BackupDirectory is the determining value: 1 backs up to Entra ID, 2 to Active Directory. The presence of a configuration root alone does not mean password management is in effect.",
+      "absent_means": {
+        "result": "Fail",
+        "interpretation": "No password backup directory is configured, so local administrator passwords are not being managed or rotated. Where the same password is used across hosts this enables lateral movement, though that reuse is a separate finding requiring its own evidence."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-2",
+          "control_title": "Account Management"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "CRED09",
+      "title": "Legacy network authentication is not permitted",
+      "category": "credential_protection",
+      "source": "lsa",
+      "field": "LmCompatibilityLevel",
+      "type": "numeric_min",
+      "expected": 3,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Levels 0, 1 and 2 permit LAN Manager or NTLMv1 authentication. An absent value behaves as level 3 on modern Windows, but a domain controller may still accept NTLMv1 from clients.",
+      "absent_means": {
+        "result": "Unknown",
+        "interpretation": "No value is configured. The effective level cannot be confirmed from this evidence alone and should be verified against the applicable baseline."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-5",
+          "control_title": "Authenticator Management"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-13",
+          "control_title": "Cryptographic Protection"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "LOG03",
+      "title": "PowerShell 7 script block logging is enabled",
+      "category": "audit_logging",
+      "source": "pscorelogging",
+      "field": "CoreEnableScriptBlockLogging",
+      "type": "int",
+      "expected": 1,
+      "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
+      "applicability": "Only applicable where PowerShell 7 is installed. Configuring the Windows PowerShell policy root does not configure PowerShell 7.",
+      "absent_means": {
+        "result": "Unknown",
+        "interpretation": "No PowerShell 7 policy is configured. Whether that matters depends on whether PowerShell 7 is installed on this host, which the same evidence source records."
+      },
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AU-2",
+          "control_title": "Event Logging"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AU-12",
+          "control_title": "Audit Record Generation"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "WLAN01",
+      "title": "No saved open network is set to connect automatically",
+      "category": "wireless",
+      "source": "wirelessposture",
+      "field": "OpenAutoConnectCount",
+      "type": "int",
+      "expected": 0,
+      "gate": {
+        "field": "WirelessPresent",
+        "enabled": 1,
+        "disabled": 0
+      },
+      "basis": "CIS/vendor wireless hardening reference; confirm the applicable benchmark with the client",
+      "applicability": "Applicable to hosts with a wireless adapter. An open network set to auto-connect lets the host silently join a same-named attacker access point.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-18",
+          "control_title": "Wireless Access"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "WLAN02",
+      "title": "No saved network uses legacy WPA or WEP encryption",
+      "category": "wireless",
+      "source": "wirelessposture",
+      "field": "LegacyEncryptionCount",
+      "type": "int",
+      "expected": 0,
+      "gate": {
+        "field": "WirelessPresent",
+        "enabled": 1,
+        "disabled": 0
+      },
+      "basis": "WPA(1)/WEP are deprecated; WPA2 or WPA3 is the accepted baseline",
+      "applicability": "Applicable to hosts with a wireless adapter. Legacy encryption is broken and exposes the pre-shared key and traffic.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-8",
+          "control_title": "Transmission Confidentiality and Integrity"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-18",
+          "control_title": "Wireless Access"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "WLAN03",
+      "title": "No saved network uses the weak TKIP cipher",
+      "category": "wireless",
+      "source": "wirelessposture",
+      "field": "TkipCipherCount",
+      "type": "int",
+      "expected": 0,
+      "gate": {
+        "field": "WirelessPresent",
+        "enabled": 1,
+        "disabled": 0
+      },
+      "basis": "TKIP is deprecated; CCMP/GCMP (AES) is the accepted baseline",
+      "applicability": "Applicable to hosts with a wireless adapter. TKIP is cryptographically weak and should not be negotiated.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-8",
+          "control_title": "Transmission Confidentiality and Integrity"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "WLAN04",
+      "title": "802.1X wireless profiles validate the authentication server certificate",
+      "category": "wireless",
+      "source": "wirelessposture",
+      "field": "EnterpriseNoServerValidationCount",
+      "type": "int",
+      "expected": 0,
+      "gate": {
+        "field": "WirelessPresent",
+        "enabled": 1,
+        "disabled": 0
+      },
+      "basis": "Enterprise (802.1X) profiles must validate the RADIUS server certificate against a trusted root",
+      "applicability": "Applicable to hosts with a wireless adapter and 802.1X profiles. Without server-certificate validation a rogue access point can present a fake RADIUS server and harvest domain credentials (evil twin).",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-3",
+          "control_title": "Device Identification and Authentication"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-18",
+          "control_title": "Wireless Access"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "WLAN05",
+      "title": "The currently connected wireless network uses WPA2 or WPA3",
+      "category": "wireless",
+      "source": "wirelessposture",
+      "field": "ConnectedAuthWpa2OrBetter",
+      "type": "enum_bool",
+      "expected": true,
+      "gate": {
+        "field": "WirelessPresent",
+        "enabled": 1,
+        "disabled": 0
+      },
+      "basis": "An active association should use WPA2 or WPA3, never open or legacy",
+      "applicability": "Applicable only when the host is currently associated to a wireless network. Not evaluated when disconnected.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-8",
+          "control_title": "Transmission Confidentiality and Integrity"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-18",
+          "control_title": "Wireless Access"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "WLAN06",
+      "title": "No open (unencrypted) wireless network is saved",
+      "category": "wireless",
+      "source": "wirelessposture",
+      "field": "OpenNetworkCount",
+      "type": "int",
+      "expected": 0,
+      "gate": {
+        "field": "WirelessPresent",
+        "enabled": 1,
+        "disabled": 0
+      },
+      "basis": "Saved open networks are a standing exposure even when connected manually",
+      "applicability": "Applicable to hosts with a wireless adapter. A saved open profile can be silently impersonated by an attacker access point.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-18",
+          "control_title": "Wireless Access"
+        }
+      ],
+      "phase": "host_configuration"
+    },
+    {
+      "id": "WLAN07",
+      "title": "Corporate wireless uses 802.1X rather than only a shared pre-shared key",
+      "phase": "host_configuration",
+      "category": "wireless",
+      "source": "wirelessposture",
+      "field": "PskNetworkCount",
+      "type": "int",
+      "expected": 0,
+      "gate": {
+        "field": "WirelessPresent",
+        "enabled": 1,
+        "disabled": 0
+      },
+      "basis": "A WPA2/WPA3-Personal pre-shared key is recoverable from any joined endpoint; corporate wireless should use 802.1X",
+      "applicability": "Advisory. Flags saved Personal (PSK) networks because the key can be extracted off any endpoint that stored it. Corporate SSIDs should use 802.1X; home or guest networks are expected exceptions the analyst records.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "IA-2",
+          "control_title": "Identification and Authentication (Organizational Users)"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-18",
+          "control_title": "Wireless Access"
+        }
+      ]
+    },
+    {
+      "id": "WLAN08",
+      "title": "The connected wireless network uses management-frame protection (PMF)",
+      "phase": "host_configuration",
+      "category": "wireless",
+      "source": "wirelessposture",
+      "field": "ConnectedManagementFrameProtection",
+      "type": "enum_bool",
+      "expected": true,
+      "gate": {
+        "field": "WirelessPresent",
+        "enabled": 1,
+        "disabled": 0
+      },
+      "basis": "802.11w management-frame protection (mandatory with WPA3) resists deauthentication and management-frame spoofing",
+      "applicability": "Evaluated only when associated and the AKM suite can be read. Absence of PMF permits deauthentication and management-frame attacks that assist evil-twin and denial conditions.",
+      "control_refs": [
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "SC-8",
+          "control_title": "Transmission Confidentiality and Integrity"
+        },
+        {
+          "framework": "NIST SP 800-53 Rev 5",
+          "control_id": "AC-18",
+          "control_title": "Wireless Access"
+        }
+      ]
+    }
+  ],
+  "control_baseline": {
+    "framework": "NIST SP 800-53 Rev 5",
+    "notice": "Baseline control references only. They identify which control family a check relates to; they are not a certification and they do not assert that the control as a whole is met. Engagement-specific frameworks are added through an overlay file rather than being written into this profile, so one client's framework never becomes every client's. Control identifiers for frameworks that are not public - a client's own benchmark, or a proprietary control-numbering scheme - must be transcribed from the framework document by an assessor and are deliberately not guessed here."
+  }
+}

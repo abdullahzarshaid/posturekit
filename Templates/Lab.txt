@@ -1,0 +1,124 @@
+NETWORK ASSESSMENT TOOLKIT - LAB ENVIRONMENT RECORD
+
+Every field below must be a fact you observed, not a value copied from this
+template and not a value recalled from memory. Where a field does not apply,
+write "not applicable" and why. Where you did not check, write "not checked" -
+never leave a guess in its place.
+
+Date:
+Assigned engineer:
+Reviewer:
+
+
+1. HYPERVISOR AND HOST ENVIRONMENT
+- Hypervisor product and exact build:
+- Host operating system:
+- Network topology (name the virtual switch, and state how it is isolated from
+  production and from the internet):
+
+
+2. MACHINE PROFILES AND ADDRESS PLAN
+- Subnet:
+- Gateway:
+- Name resolution:
+
+  For EACH machine, take these from the raw collected evidence, not from the
+  installer and not from memory. The host record carries the edition, build,
+  servicing level and PowerShell version; use those values.
+
+  Machine 1
+  - Name:
+  - Role:
+  - Operating system and EDITION exactly as the evidence reports it:
+  - Build and servicing level (the full_build value):
+  - Language:
+  - PowerShell version:
+  - Execution context - state whether the collection ran elevated or as a
+    standard user. The evidence records this and the two must agree:
+  - Resources:
+  - IPv4 address:
+
+  Machine 2
+  - Name:
+  - Role:
+  - Operating system and EDITION:
+  - Build and servicing level:
+  - Language:
+  - PowerShell version:
+  - Execution context:
+  - Resources:
+  - IPv4 address:
+
+  Machine 3 - domain controller, where a domain lab is built
+  - Name:
+  - Role:
+  - Operating system and EDITION:
+  - Build and servicing level:
+  - Domain name and functional level:
+  - IPv4 address:
+
+
+3. LAB SECURITY AND SNAPSHOT BASELINE
+- Snapshots taken before testing, and their names:
+- Scope authorisation reference:
+- Firewall baseline before any test change:
+- Confirm every test change is documented and reversible:
+
+
+4. EXECUTION RECORD
+   For each gate record the exact command line used, the start and finish time,
+   the resulting batch identifier, and the status the evidence reports - not the
+   status you expected.
+
+   SYNTAX AND PREFLIGHT
+   - Command line used, verbatim:
+   - Files parsed, count and result:
+   - Preflight output path per machine:
+
+   LOCAL COLLECTION
+   - Machine 1: command / start / finish / batch / status:
+   - Machine 2: command / start / finish / batch / status:
+
+   CENTRAL EXECUTION
+   - Success case: command / target / batch / status:
+   - Denied or unreachable case: command / target / status / the preserved
+     provider error text:
+
+   NETWORK VANTAGE
+   - Test 1, before any restriction: source, target, port, outcome:
+   - Test 2, after the restriction: source, target, port, outcome:
+   - The control that caused the change, exported as corroboration:
+   - Confirm the change was reverted:
+
+   MISSING UPDATE DETERMINATION
+   - Servicing level observed:
+   - Product matched:
+   - Result and counts:
+
+   OFFLINE UPDATE SCAN
+   - Catalogue file date:
+   - Result:
+   - Disagreements with the servicing-level determination:
+
+   EXPANDED HARDENING COMPARISON
+   - Tool version and finding list used:
+   - Checks executed:
+   - Checks removed, and the reason for each:
+
+   AGENTLESS COLLECTION COMPARISON
+   - Coverage difference against the full collector:
+
+   DIRECTORY COLLECTION, where a domain lab exists
+   - Result for each of the six directory sources, per machine:
+   - Central execution by fully qualified name using Kerberos:
+   - Collection against the domain controller itself:
+   - Execution delivered by Group Policy:
+
+   NETWORK OBSERVATION
+   - Tool, version, command line:
+   - Or, if omitted: the blocker, and why it could not be resolved:
+
+
+5. BLOCKERS
+   Record anything that stopped you, the exact error text, and what you tried.
+   A blocker recorded honestly is a result. A task quietly skipped is not.

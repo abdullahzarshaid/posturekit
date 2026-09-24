@@ -1,0 +1,61 @@
+NETWORK ASSESSMENT TOOLKIT - TOOL EVALUATION RECORD
+
+Compare our approach against the alternatives below. Base every statement on what
+you observed when you ran the tool, not on what its documentation claims. Where
+you did not run something, say so plainly rather than describing it from reading.
+
+Engineer:
+Date:
+Environment the comparison was performed in:
+
+
+FOR EACH TOOL, RECORD:
+
+  Tool and exact version:
+  Licence, and any restriction on commercial or consulting use:
+  What problem it solves that our approach does not:
+  Does it require an agent, and is that agent permanent or one-time:
+  How it is deployed:
+  Permissions it requires, and whether elevation is needed:
+  Output format, and how readily it normalises into our evidence contract:
+  Does it work offline or air-gapped:
+  How it behaves at scale:
+  Maintenance burden - feeds, signatures, list curation:
+  Where it COMPLEMENTS our approach:
+  Where it would REPLACE part of our approach:
+  What you observed that its documentation does not mention:
+
+
+1. EXPANDED HARDENING CHECK SET
+
+
+2. ENDPOINT COLLECTION AND FORENSIC FRAMEWORK
+
+
+3. NETWORK VULNERABILITY SCANNER
+
+
+4. ANY OTHER TOOL YOU EVALUATED
+
+
+HOW THE APPROACH CHANGES WHERE A CLIENT ALREADY OPERATES:
+
+  A configuration management platform:
+  A mobile device management platform:
+  A remote monitoring and management platform:
+  Endpoint detection with remote script capability:
+  An existing commercial vulnerability scanner:
+
+  In each case, state whether we should use what the client already has instead
+  of deploying anything of our own, and what evidence we would lose or gain.
+
+
+RECOMMENDATION
+
+  For each tool, one of: adopt, adopt partially, or reject.
+  Give the reason from what you observed. If you adopt partially, say exactly
+  which parts and which parts you are rejecting, with a line of reasoning for
+  each rejection.
+
+  Do not inherit any tool's severity ratings as ours. Their scoring reflects
+  their own model and their own assumptions about the environment.

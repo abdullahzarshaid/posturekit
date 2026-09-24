@@ -1,0 +1,33 @@
+﻿{
+  "schema_version": "1.0",
+  "engagement_id": "LAB-001",
+  "approved_for_lab": false,
+  "approval_reference": "UNAPPROVED",
+  "targets": [
+    {
+      "asset_id": "LABCLIENT",
+      "site_id": "LAB",
+      "computer_name": "LABCLIENT",
+      "connection_name": "LABCLIENT",
+      "transport": "HttpsNegotiate",
+      "enabled": true
+    },
+    {
+      "asset_id": "LABSERVER",
+      "site_id": "LAB",
+      "computer_name": "LABSERVER",
+      "connection_name": "LABSERVER",
+      "transport": "HttpsNegotiate",
+      "enabled": true
+    }
+  ],
+  "network": {
+    "enabled": false,
+    "source_asset_id": "LABCLIENT",
+    "source_ip": "192.168.77.10",
+    "source_context": "Set only after confirming the actual isolated-lab interface and network position.",
+    "paths": [
+      {"test_id":"NETKNOWN","target_ip":"192.168.77.20","port":445,"expected":"Reachable"}
+    ]
+  }
+}

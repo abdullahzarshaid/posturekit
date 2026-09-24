@@ -1,0 +1,6 @@
+platform,edition,build,role,language,powershell,local_collection,remote_winrm,agentless_cim,baseline_profile,network_test,status,evidence_reference,notes
+Windows 11,,,,,,,,,,,,Not tested,,
+Windows 10,,,,,,,,,,,,Not tested,,
+Windows Server 2022,,,,,,,,,,,,Not tested,,
+Windows Server 2019,,,,,,,,,,,,Not tested,,
+Windows Server 2016,,,,,,,,,,,,Not tested,,

@@ -1,0 +1,17 @@
+﻿{
+  "schema_version": "1.0",
+  "engagement_id": "LAB-DOMAIN",
+  "approved_for_lab": false,
+  "approval_reference": "UNAPPROVED",
+  "targets": [
+    {"asset_id":"LABCLIENT","site_id":"LAB","computer_name":"LABCLIENT","connection_name":"labclient.lab.local","transport":"Kerberos","enabled":true},
+    {"asset_id":"LABSERVER","site_id":"LAB","computer_name":"LABSERVER","connection_name":"labserver.lab.local","transport":"Kerberos","enabled":true}
+  ],
+  "network": {
+    "enabled": false,
+    "source_asset_id":"LABCLIENT",
+    "source_ip":"192.168.77.10",
+    "source_context":"Set after confirming source VLAN/subnet and routes.",
+    "paths":[{"test_id":"NETKNOWN","target_ip":"192.168.77.20","port":445,"expected":"Reachable"}]
+  }
+}

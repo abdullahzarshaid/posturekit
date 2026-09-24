@@ -1,0 +1,15 @@
+{
+  "_comment": "Wireless Layer C intake. Copy this file, fill it from the client's wireless-controller export or console (Cisco WLC/9800, Aruba, Meraki, UniFi, Ruckus, etc.), then run Extensions\\WirelessControllerImport.py. This is a configuration review, not a live connection. Allowed values: purpose = corporate|guest|iot|voice|byod|other ; security = open|wep|wpa-psk|wpa2-psk|wpa3-psk|wpa2-enterprise|wpa3-enterprise|wpa2/wpa3-mixed ; pmf = disabled|optional|required ; vlan = integer or null ; client_isolation = true|false|null.",
+  "engagement_id": "REPLACE-WITH-ENGAGEMENT-ID",
+  "site_id": "LAB",
+  "controller_vendor": "UniFi",
+  "source_position": "Client wireless controller configuration export, dated YYYY-MM-DD",
+  "controller": {
+    "rogue_detection_enabled": false,
+    "wips_enabled": false
+  },
+  "wlans": [
+    { "ssid": "Corp-Example",  "purpose": "corporate", "security": "wpa2-enterprise", "pmf": "required", "vlan": 20, "client_isolation": null,  "band": "5" },
+    { "ssid": "Guest-Example", "purpose": "guest",     "security": "wpa2-psk",        "pmf": "optional", "vlan": 90, "client_isolation": true,  "band": "2.4/5" }
+  ]
+}

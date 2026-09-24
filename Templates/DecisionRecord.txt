@@ -1,0 +1,6 @@
+Decision owner: ABZ
+Current gate: LAB ONLY
+Outcome: [Proceed to next lab gate / Revise / Defer]
+Evidence reviewed:
+Blockers:
+Next action / owner / acceptance criterion:

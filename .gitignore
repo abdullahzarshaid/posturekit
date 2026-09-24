@@ -1,0 +1,18 @@
+# Evidence and reports produced by a run - never commit collected data
+Evidence/
+Reports/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

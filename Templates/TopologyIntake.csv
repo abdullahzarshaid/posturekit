@@ -1,0 +1,1 @@
+site,network_or_vlan,subnet_cidr,security_zone,gateway,routed_from_management,firewall_boundary,expected_peer_zones,scan_restrictions,local_probe_needed,notes

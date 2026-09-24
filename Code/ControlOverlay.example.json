@@ -1,0 +1,36 @@
+{
+ "schema_version": "1.0",
+ "overlay_id": "EXAMPLE-ENGAGEMENT-OVERLAY",
+ "notice": "Per-engagement control overlay. Copy this file, rename it for the engagement, and populate it from the client's actual framework document. Every identifier here must be transcribed from that document - never inferred, never guessed. Rules not listed keep only their baseline references. An overlay never changes what is tested or what result is produced; it only adds the client's own control identifiers alongside ours.",
+ "frameworks_declared": [
+  {
+   "name": "<framework name as printed on the client's document>",
+   "version": "<version or release date>",
+   "source_document": "<file name or reference the assessor read>"
+  }
+ ],
+ "mappings": {
+  "SMB02": [
+   {
+    "framework": "<framework name>",
+    "control_id": "<id from the document>",
+    "control_title": "<title from the document>"
+   }
+  ],
+  "LOG01": [
+   {
+    "framework": "<framework name>",
+    "control_id": "<id from the document>",
+    "control_title": "<title from the document>"
+   }
+  ]
+ },
+ "additional_requirements": [
+  {
+   "requirement_id": "<client requirement with no matching rule>",
+   "description": "<what the client asks for>",
+   "coverage": "NotCovered",
+   "note": "Record honestly where the toolkit does not cover a client requirement rather than stretching an existing rule to look like it does."
+  }
+ ]
+}

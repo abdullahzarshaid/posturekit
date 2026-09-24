@@ -1,0 +1,68 @@
+WIRELESS LAYER B - OVER-THE-AIR CAPTURE RUNBOOK
+
+WHAT THIS IS
+The over-the-air layer looks for rogue and evil-twin access points, open and hidden
+SSIDs, WPS exposure and guest-to-corporate bleed. Radio does not travel over a
+network, so this layer is done ON SITE with a monitor-mode adapter. The toolkit does
+not transmit or capture radio; it imports the capture files you produce here.
+
+AUTHORIZATION - READ FIRST
+- Only on an engagement whose signed authorization explicitly permits wireless /
+  over-the-air testing at the named site and dates.
+- Passive observation only by default. Do NOT deauthenticate, inject, or stand up a
+  fake access point unless the authorization names active wireless testing.
+- Capturing management/data frames near a client's network can look like an attack
+  to their WIPS. Tell the client's security team before you start.
+
+HARDWARE
+- A monitor-mode, dual-band (2.4 and 5 GHz) USB adapter. Reference model:
+  Alfa AWUS036ACM (MediaTek MT7612U, in-kernel driver). 2.4-GHz-only adapters miss
+  corporate 5 GHz and are not sufficient.
+- A Linux host (Kali or similar). None of this runs on Windows.
+
+STEP 1 - MONITOR MODE
+  sudo airmon-ng check kill
+  sudo airmon-ng start wlan0
+  (adapter appears as wlan0mon)
+
+STEP 2 - SURVEY ALL CHANNELS, WRITE CSV
+  sudo airodump-ng --band abg --write-interval 1 --output-format csv -w capture wlan0mon
+  Let it run long enough to see the site's APs on 2.4 and 5 GHz. Ctrl-C to stop.
+  This writes capture-01.csv (the file the importer reads).
+
+STEP 3 - WPS EXPOSURE (optional but recommended)
+  sudo wash -i wlan0mon > wash.txt
+  Lists access points with WPS enabled.
+
+STEP 4 - PREPARE THE AUTHORIZED ALLOWLIST
+  Copy Extensions\WirelessAuthorized.example.json and fill it from the client's own
+  inventory: their corporate ESSIDs and the BSSIDs of their sanctioned access points.
+  Anything broadcasting a corporate ESSID that is NOT in this list is flagged as a
+  rogue/evil-twin candidate, so the list must be complete and client-confirmed.
+
+STEP 5 - NORMALIZE INTO EVIDENCE (on the analysis host)
+  python Extensions/WirelessAirImport.py \
+    --input capture-01.csv \
+    --authorized WirelessAuthorized.json \
+    --wash wash.txt \
+    --engagement <ENGAGEMENT-ID> \
+    --source-position "3rd floor, client HQ, 2026-10-20" \
+    --output AirEvidence.json
+
+STEP 6 - FOLD INTO THE ASSESSMENT
+  python Code/Analyze.py --batch <host-batch> --wireless-air AirEvidence.json \
+    --output <report-dir>
+  Rogue/evil-twin, open corporate and WPS findings appear as AIR.* results; hidden
+  and external networks are recorded as observations. An assessor assigns severity.
+
+OPTIONAL - EVIL-TWIN / 802.1X CREDENTIAL EXPOSURE (active, authorization required)
+  If the authorization permits active testing, hostapd-wpe provides a controlled
+  fake 802.1X endpoint to demonstrate that clients without server-certificate
+  validation will hand over credentials. This is a demonstration on your own target
+  radio, never against the client's production users. Record it as a controlled
+  proof, not as harvested live credentials.
+
+LIMITS
+- One position and time window; absence of a rogue is not proof there is none.
+- Rogue classification is only as good as the authorized allowlist.
+- 2.4-GHz-only adapters, and adapters without monitor mode, cannot do this layer.
