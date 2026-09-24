@@ -3,7 +3,6 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
-[![Tests](https://github.com/abdullahzarshaid/posturekit/actions/workflows/tests.yml/badge.svg)](https://github.com/abdullahzarshaid/posturekit/actions/workflows/tests.yml)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 ![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
@@ -67,6 +66,7 @@ hash, the method, and the outcome.
 git clone https://github.com/abdullahzarshaid/posturekit.git
 cd posturekit
 python Code/Tests.py
+python -m unittest discover -s tests -v
 ```
 
 These tests use synthetic fixtures and do not contact hosts. Actual collection below requires
