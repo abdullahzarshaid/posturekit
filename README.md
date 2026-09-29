@@ -4,16 +4,23 @@
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-102%20passing-brightgreen.svg)
 ![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
 **Evidence-first, credentialed Windows and network security posture assessment.**
 
 PostureKit reads a fixed set of security-relevant facts from authorized Windows hosts, records their
 hashes for later integrity checks, and evaluates them against a transparent rule set. It also folds
-in adjacent planes - patch state, wireless configuration, and network vulnerability scans - through
+in adjacent planes (patch state, wireless configuration, and network vulnerability scans) through
 importers. It identifies and reports; it does not exploit, and it never assigns severity on its own.
 
 ![Architecture](docs/architecture.png)
+
+> **Read the full specification.** Part VII of the companion
+> [Network Security Assessment Handbook](https://abdullahzarshaid.github.io/network-security-assessment-handbook/handbook.html#p7)
+> explains every part of this tool in plain words and in detail: the design philosophy, the 45 evidence
+> sources, the 45 rules, the patch engine, deployment adapters, evidence return and the validation status.
+> Part V covers the wireless layers it implements. The handbook is free to read online or as a PDF.
 
 ## See it work without collecting from your computer
 
@@ -28,8 +35,9 @@ evidence trail. PostureKit is deliberately the opposite:
 
 - **Deterministic, no black box.** Every result comes from a named check against a value the tool read
   from the host. There is no machine-learning guess in the evidence path.
-- **Integrity checks.** Changed files fail verification against the retained SHA-256 manifest.
-  Keep a trusted copy separately: hashes do not authenticate a manifest replaced alongside the evidence.
+- **Integrity checks.** Changed files fail verification against the retained SHA-256 manifest, and the
+  analyzer refuses a batch whose ledger and evidence hashes disagree. Keep a trusted copy separately:
+  hashes do not authenticate a manifest replaced alongside the evidence.
 - **Honest by design.** A check that cannot be completed is recorded as inconclusive, never as secure.
   Severity is always left to an analyst. The tool distinguishes what was *observed* from what is
   *inferred*.
@@ -40,29 +48,37 @@ evidence trail. PostureKit is deliberately the opposite:
 
 | Plane | What it assesses |
 |---|---|
-| **Windows host configuration** | Firewall, SMB, RDP, UAC, LSA and credential-protection settings, listening services and connections, installed software and updates, account and audit policy, and more (45 evidence sources). |
-| **Active Directory** | Domain policy, privileged groups, trusts, Kerberos policy, applied GPOs and directory identity - collected automatically when the host is domain-joined. |
+| **Windows host configuration** | Firewall, SMB, RDP, UAC, LSA and credential-protection settings, listening services and connections, installed software and updates, account and audit policy, and more (45 evidence sources, 45 rules). |
+| **Active Directory** | Domain policy, privileged groups (with SIDs and members), trusts, Kerberos ticket policy read from SYSVOL, applied GPOs and directory identity. Read from the domain controller; a member host reached through a remote session records the domain-level sources as not applicable, with the reason. |
 | **Wireless** | Host-side 802.11 configuration (saved networks, encryption, cipher, auto-join, 802.1X server-certificate validation, PMF, pre-shared-key exposure), plus importers for over-the-air captures and wireless-controller configuration. |
-| **Patch state** | Missing Microsoft updates with vendor CVSS scores, from an offline catalog and Microsoft's free feed. |
-| **Network** | Reachability and segmentation checks between vantage points, and import of Greenbone/OpenVAS vulnerability reports. |
+| **Patch state** | Missing Microsoft updates with vendor CVSS scores and CISA known-exploited flags, from an offline catalog and Microsoft's free feed. |
+| **Network** | Reachability and segmentation checks between vantage points (with liveness corroboration), and import of Greenbone/OpenVAS vulnerability reports. |
 
 ## How it works
 
-1. **Collect** - `Code/Run.ps1` launches `Code/Collect.ps1` against a host named in your scope. It reads
-   a fixed set of facts read-only and writes them as a sealed, hashed evidence batch.
-2. **Seal and verify** - each batch carries a `Manifest.txt` of SHA-256 hashes. `Code/VerifyManifest.py`
+1. **Collect**: `Code/Run.ps1` launches `Code/Collect.ps1` against a host named in your scope, locally or
+   over WinRM. It reads a fixed set of facts read-only and writes them as a sealed, hashed evidence batch.
+2. **Seal and verify**: each batch carries a `Manifest.txt` of SHA-256 hashes. `Code/VerifyManifest.py`
    confirms nothing changed.
-3. **Analyze** - `Code/Analyze.py` evaluates a batch against `Code/Rules.json` and writes a normalized
-   evidence set (`Evidence.json`, `Tests.csv`, `Summary.html`). Importers in `Extensions/` add the other
-   planes.
+3. **Analyze**: `Code/Analyze.py` evaluates one or more batches against `Code/Rules.json` and writes a
+   normalized evidence set (`Evidence.json`, `Tests.csv`, `Summary.html`). Importers in `Extensions/`
+   add the other planes.
 
 Every result carries the control it relates to (NIST SP 800-53 references), the evidence pointer and its
 hash, the method, and the outcome.
 
+## Validated on
+
+Windows 10, Windows 11, Server 2016, Server 2019 and Server 2022 (member and domain controller) in a
+six-machine virtual lab, including central collection over WinRM with Kerberos from one admin host to
+four servers in a single run. The remaining items need equipment or a real environment rather than code:
+over-the-air wireless capture, a real controller export, a live Greenbone scan and a non-English host.
+See [CHANGELOG.md](CHANGELOG.md) for what the lab found and what changed.
+
 ## Requirements
 
 - **Windows PowerShell 5.1** on the machine you collect from (the collector is PowerShell).
-- **Python 3.10+** on the machine you analyze from (standard library only - no third-party packages).
+- **Python 3.10+** on the machine you analyze from (standard library only, no third-party packages).
 
 ## Quick start
 
@@ -86,6 +102,9 @@ powershell -ExecutionPolicy Bypass -File Code\Run.ps1 -ScopePath scope.json -Mod
 # 3. Analyze the sealed batch (off the host):
 python Code/Analyze.py --batch Evidence/Raw/<batch-id> --output Reports/HOST01
 
+# Several batches of the same engagement in one report (for example a central run plus one host collected locally):
+python Code/Analyze.py --batch Evidence/Raw/<central-batch> --batch Evidence/Raw/<local-batch> --output Reports/All
+
 # Optional: fold in other planes
 python Code/Analyze.py --batch Evidence/Raw/<batch-id> \
   --greenbone gvm.json --wireless-controller controller.json --output Reports/HOST01
@@ -97,12 +116,18 @@ Verify a batch at any time:
 python Code/VerifyManifest.py Evidence/Raw/<batch-id>
 ```
 
+Determine outstanding Microsoft updates for a batch (one internet fetch, then it works offline):
+
+```bash
+python Extensions/PatchCheck.py --batch Evidence/Raw/<batch-id> --output Reports/HOST01-Patch --months 60
+```
+
 ## Project layout
 
 ```
 Code/          collector (Run.ps1, Collect.ps1, Common.ps1), analyzer (Analyze.py),
-               rule set (Rules.json), scope examples, manifest verifier, test suite
-Extensions/    importers and their runbooks - patch, wireless, network scan, software, findings draft
+               rule set (Rules.json), network tester, scope examples, manifest verifier, test suite
+Extensions/    importers and their runbooks: patch, wireless, network scan, software, findings draft
 Templates/     blank intake templates for an engagement
 docs/          architecture diagram
 ```
@@ -114,7 +139,7 @@ into an evidence document, and `Analyze.py` folds it in through a flag (`--green
 `--wireless-controller`, `--nmap`, `--hardeningkitty`, `--cim`). The existing importers in `Extensions/`
 are the pattern to copy for a new one.
 
-## Scope - what it does *not* do
+## Scope: what it does *not* do
 
 - It does **not** exploit, pivot, or prove exploitability. It identifies and evidences configuration and
   patch weaknesses.
@@ -128,14 +153,14 @@ are the pattern to copy for a new one.
 python Code/Tests.py
 ```
 
-The suite runs on synthetic data only - no PowerShell is executed and no host is contacted.
+The suite runs on synthetic data only: no PowerShell is executed and no host is contacted.
 
 ## Contributing
 
-Issues and pull requests are welcome - new rule packs, additional importers, and coverage for more
+Issues and pull requests are welcome: new rule packs, additional importers, and coverage for more
 Windows versions are all good first contributions. Open an issue to discuss anything larger.
 
-If PostureKit is useful to you, a ⭐ helps others find it.
+If PostureKit is useful to you, a star helps others find it.
 
 ## License
 
