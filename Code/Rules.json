@@ -1,4 +1,4 @@
-﻿{
+{
   "schema_version": "1.0",
   "profile_id": "LAB-REFERENCE-03",
   "notice": "Illustrative lab reference conditions only. Not a CIS or Microsoft certification and not a client-approved benchmark. A Fail is a configuration observation that requires analyst review against the client's approved baseline and documented exceptions before it becomes a finding. Where a value is absent, the rule states explicitly what that absence means; no default is ever assumed silently. Severity is never assigned by this rule set.",
@@ -730,7 +730,7 @@
       "type": "int",
       "expected": 1,
       "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
-      "applicability": "Microsoft states that no combination of other mitigations is equivalent to this setting. Applies wherever the print spooler is running.",
+      "applicability": "Applies when the print spooler service is running; a stopped spooler is recorded as not applicable. Microsoft states that no combination of other mitigations is equivalent to this setting.",
       "absent_means": {
         "result": "Fail",
         "interpretation": "No policy is configured, so non-administrators may install printer drivers, which execute with system privileges."
@@ -747,7 +747,12 @@
           "control_title": "User-Installed Software"
         }
       ],
-      "phase": "host_configuration"
+      "phase": "host_configuration",
+      "gate": {
+        "field": "SpoolerRunning",
+        "enabled": 1,
+        "disabled": 0
+      }
     },
     {
       "id": "PRN02",
@@ -823,11 +828,11 @@
       "title": "NetBIOS over TCP/IP is disabled on every interface",
       "category": "name_resolution",
       "source": "nameresolution",
-      "field": "NetbiosInterfaces",
-      "type": "string",
-      "expected": "",
+      "field": "NetbiosEnabledCount",
+      "type": "int",
+      "expected": 0,
       "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
-      "applicability": "Evaluated by the analyst per interface: a NetbiosOptions value of 2 is disabled, while 0 and 1 both leave it enabled. Every interface must be checked, not only the primary one.",
+      "applicability": "Counts interfaces whose NetbiosOptions is not 2 (disabled). Values 0 and 1 and an absent value all leave NetBIOS enabled by default. Every interface is counted, not only the primary one; the per-interface list is in NetbiosInterfaces.",
       "absent_means": {
         "result": "Unknown",
         "interpretation": "No interface records were read, so no determination is made."

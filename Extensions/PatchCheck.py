@@ -47,7 +47,7 @@ MSRC_INDEX = "https://api.msrc.microsoft.com/cvrf/v3.0/updates"
 MSRC_DOC = "https://api.msrc.microsoft.com/cvrf/v3.0/cvrf/{}"
 KEV_URL = ("https://www.cisa.gov/sites/default/files/feeds/"
            "known_exploited_vulnerabilities.json")
-UA = "-NetworkAssessment/PatchCheck"
+UA = "PostureKit/PatchCheck"
 TIMEOUT = 90
 
 
@@ -161,7 +161,14 @@ def match_product(names, os_caption, display_version, architecture,
             is_core = want_core in lowered
             if is_core != core:
                 continue
-            candidates.append((10, product_id, name))
+            # Edition qualifiers the host caption does not carry ("23H2 Edition",
+            # "Datacenter: Azure Edition") make a product a worse match, never a
+            # better one. Without this the larger product id (the newer edition)
+            # won on a tie and a 20348 Server Core host was scored against 25398.
+            residue = lowered.replace("windows server " + year.group(1), "", 1)
+            residue = residue.replace(want_core, "").strip(" ,")
+            score = 100 if (not residue or residue in caption) else 100 - len(residue)
+            candidates.append((score, product_id, name))
 
     elif "windows 11" in caption or "windows 10" in caption:
         family = "windows 11" if "windows 11" in caption else "windows 10"
@@ -186,6 +193,19 @@ def match_product(names, os_caption, display_version, architecture,
 
     candidates.sort(reverse=True)
     return [(product_id, name) for _score, product_id, name in candidates]
+
+
+_MONTHS = {m: i for i, m in enumerate(["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
+
+
+def _release_date(release):
+    """Sort key for MSRC release IDs such as 2026-Sep; unparseable IDs sort first."""
+    import re as _re
+    match = _re.match(r"(\d{4})-([A-Za-z]{3})", str(release.get("ID", "")))
+    if not match:
+        return (0, 0)
+    return (int(match.group(1)), _MONTHS.get(match.group(2).title(), 0))
 
 
 def missing_for_host(document, product_id, host_build):
@@ -298,6 +318,9 @@ def main():
     index, _origin = _cached(cache_dir, "msrc_index.json", MSRC_INDEX,
                              arguments.offline)
     releases = index.get("value", index)
+    # The MSRC index is not chronological (it sorts alphabetically, Apr before Jan),
+    # so slice the window only after sorting by year and month.
+    releases = sorted(releases, key=_release_date)
     recent = releases[-arguments.months:] if arguments.months else releases
 
     product_id = None

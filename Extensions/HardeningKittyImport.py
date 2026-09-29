@@ -29,7 +29,8 @@ def main()->int:
         rows=[]
         with args.input.open('r',encoding='utf-8-sig',newline='') as f:
             r=csv.DictReader(f)
-            if r.fieldnames!=REQ:raise ValueError(f'Unexpected HardeningKitty CSV columns: {r.fieldnames!r}')
+            # Newer HardeningKitty releases add columns (DefaultValue, Filter); require ours, ignore extras.
+            if not set(REQ).issubset(set(r.fieldnames or [])):raise ValueError(f'HardeningKitty CSV is missing required columns: {r.fieldnames!r}')
             seen=set()
             for i,row in enumerate(r,2):
                 rid=(row['ID'] or '').strip()

@@ -406,5 +406,35 @@ class WirelessImportTests(unittest.TestCase):
         doc={'schema_version':'1.0','tool_version':a.VERSION,'evidence_kind':'GreenboneObservations','engagement_id':'X','observations':[]}
         with self.assertRaises(ValueError): a.import_greenbone(self._w(doc),'E')
 
+class Build20260928Tests(unittest.TestCase):
+    """Regression tests for the defects found in the September 2026 lab rounds."""
+    def test_server_core_prefers_base_product_over_edition_variant(self):
+        names=dict(PRODUCTS); names['12244']='Windows Server 2022, 23H2 Edition (Server Core)'
+        m=pc.match_product(names,'Microsoft Windows Server 2022 Standard Evaluation','21H2','64-bit','Server Core')
+        self.assertEqual(m[0][0],'11924')
+    def test_msrc_release_window_is_chronological(self):
+        rel=[{'ID':'2026-Apr'},{'ID':'2025-Sep'},{'ID':'2026-Jan'},{'ID':'2026-Sep'}]
+        self.assertEqual([r['ID'] for r in sorted(rel,key=pc._release_date)],['2025-Sep','2026-Jan','2026-Apr','2026-Sep'])
+    def test_network_expected_blocked_with_live_host_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/'n.json'
+            p.write_text(json.dumps({'schema_version':'1.0','tool_version':'0.6','evidence_kind':'NetworkObservations','engagement_id':'E','started_utc':'2026-09-20T00:00:00+00:00','completed_utc':'2026-09-20T00:00:01+00:00','source_asset_id':'S','source_context':'VP','results':[{'test_id':'N1','target_ip':'10.0.0.2','port':445,'expected':'Blocked','connected':False,'host_alive':True,'outcome':'ExpectedBlocked','error':'timeout','timestamp_utc':'2026-09-20T00:00:01+00:00'}]}),encoding='utf-8')
+            self.assertEqual(a.import_network(p,'E')[0][0]['result'],'Pass')
+    def test_network_expected_blocked_dead_host_stays_inconclusive(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/'n.json'
+            p.write_text(json.dumps({'schema_version':'1.0','tool_version':'0.6','evidence_kind':'NetworkObservations','engagement_id':'E','started_utc':'2026-09-20T00:00:00+00:00','completed_utc':'2026-09-20T00:00:01+00:00','source_asset_id':'S','source_context':'VP','results':[{'test_id':'N1','target_ip':'10.0.0.2','port':445,'expected':'Blocked','connected':False,'host_alive':False,'outcome':'Inconclusive','error':'timeout','timestamp_utc':'2026-09-20T00:00:01+00:00'}]}),encoding='utf-8')
+            self.assertEqual(a.import_network(p,'E')[0][0]['result'],'Inconclusive')
+    def test_hardeningkitty_csv_with_extra_columns_is_accepted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); source=root/'hk.csv'; out=root/'hk.json'
+            source.write_text('ID,Category,Name,Severity,Result,Recommended,TestResult,SeverityFinding,DefaultValue,Filter\n101,Test,Setting,High,0,1,Failed,High,0,\n',encoding='utf-8')
+            c=subprocess.run([sys.executable,str(HERE.parent/'Extensions'/'HardeningKittyImport.py'),'--input',str(source),'--output',str(out),'--engagement','E','--asset-id','A','--site-id','LAB','--profile','SYN'],capture_output=True,text=True)
+            self.assertEqual(c.returncode,0,c.stderr)
+    def test_gate_rule_not_applicable_when_feature_off(self):
+        rule={'id':'PRN01','title':'x','source':'pointandprint','field':'RestrictDriverInstallationToAdministrators','type':'int','expected':1,'gate':{'field':'SpoolerRunning','enabled':1,'disabled':0}}
+        res=a.evaluate_rule(rule,{'pointandprint':source('pointandprint',[{'SpoolerRunning':0,'RestrictDriverInstallationToAdministrators':None}])},'A','S','Host.A.json','0'*64,'2026-09-20T00:00:00+00:00')
+        self.assertEqual(res['result'],'Not applicable')
+
 
 if __name__=='__main__': unittest.main()

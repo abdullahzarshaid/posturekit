@@ -74,8 +74,12 @@ try {
     $cvKey = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
     $regBuild   = [string]$cvKey.CurrentBuild
     $regUbr     = $cvKey.UBR
-    $regDisplay = [string]$cvKey.DisplayVersion
     if ($regBuild -and $null -ne $regUbr) { $regFullBuild = "10.0.$regBuild.$regUbr" }
+    # DisplayVersion exists only from Windows 10 20H2 and Server 2022. Server 2016 and
+    # 2019 carry ReleaseId only. Read both guarded, and after full_build, so StrictMode
+    # cannot abort this block before the servicing level is recorded.
+    if ($cvKey.PSObject.Properties['DisplayVersion']) { $regDisplay = [string]$cvKey.DisplayVersion }
+    elseif ($cvKey.PSObject.Properties['ReleaseId']) { $regDisplay = [string]$cvKey.ReleaseId }
 } catch {}
 try { $productUuid=[string](Get-CimInstance -ClassName Win32_ComputerSystemProduct -OperationTimeoutSec 20 -ErrorAction Stop).UUID } catch {}
 try { $machineGuid=[string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid } catch {}
@@ -260,6 +264,9 @@ Capture 'nameresolution' @('Get-ItemProperty') {
     [pscustomobject]@{
         LlmnrEnableMulticast = Get-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMulticast'
         NetbiosInterfaces    = @($nb)
+        # Interfaces where NetBIOS is not explicitly disabled (NetbiosOptions 2). Values 0
+        # and 1 and an absent value all leave NetBIOS enabled by default.
+        NetbiosEnabledCount  = @($nb | Where-Object { $null -eq $_.NetbiosOptions -or [int]$_.NetbiosOptions -ne 2 }).Count
     }
 } 'LLMNR and NetBIOS name resolution. A null LlmnrEnableMulticast means no policy is set and LLMNR remains enabled by default. NetbiosOptions 2 is disabled.'
 
@@ -356,11 +363,18 @@ Capture 'bootintegrity' @('Get-CimInstance') {
 $adReason = 'Host is not domain joined. Directory evidence does not apply.'
 
 function Get-DomainRoot {
-    # Returns the domain's root directory entry, or $null when unavailable.
+    # Returns the domain's root directory entry, or $null when it cannot be bound AND
+    # read: domain unavailable, a non-domain collecting account, or the credential
+    # second hop inside a remote session on a member host (the entry exists but its
+    # properties come back empty).
     try {
         $ctx = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext('Domain')
         $dom = [System.DirectoryServices.ActiveDirectory.Domain]::GetDomain($ctx)
-        return $dom.GetDirectoryEntry()
+        $entry = $dom.GetDirectoryEntry()
+        $dn = $null
+        try { $dn = [string]$entry.Properties['distinguishedName'].Value } catch { $dn = $null }
+        if ([string]::IsNullOrWhiteSpace($dn)) { return $null }
+        return $entry
     } catch { return $null }
 }
 
@@ -372,6 +386,16 @@ if (-not $machine.PartOfDomain) {
     NotApplicable 'kerberospolicy'        $adReason
     NotApplicable 'gpoapplied'            $adReason
 } else {
+
+# Directory policy, privileged groups and Kerberos policy are domain facts, read once
+# from the domain controller target. Inside a remote session on a member host the
+# directory cannot be bound (credential second hop), so those three sources are
+# recorded as not applicable there instead of failing.
+$dirRoot = Get-DomainRoot
+$dirReason = $null
+if ($null -eq $dirRoot -and $machine.DomainRole -lt 4 -and (Get-Variable -Name PSSenderInfo -ErrorAction SilentlyContinue)) {
+    $dirReason = 'Directory policy, privileged-group and Kerberos-policy evidence is read once from the domain controller target. In a remote session on a member host the directory cannot be bound (credential second hop), so it is not repeated here.'
+}
 
 Capture 'domainidentity' @('Get-CimInstance') {
     $d = $null
@@ -389,13 +413,27 @@ Capture 'domainidentity' @('Get-CimInstance') {
     }
 } 'Directory identity and functional level. Functional level constrains which security features are available; a low level is a configuration observation, not a vulnerability by itself.'
 
+if ($dirReason) { NotApplicable 'domainpolicy' $dirReason } else {
 Capture 'domainpolicy' @('Get-CimInstance') {
     $root = Get-DomainRoot
     if ($null -eq $root) { throw 'The domain root object could not be read with the collecting account.' }
     function Sec([object]$v) {
         # AD stores these intervals as negative 100-nanosecond values.
         if ($null -eq $v) { return $null }
-        try { $n = [int64]$v } catch { return $null }
+        $n = $null
+        try { $n = [int64]$v } catch { $n = $null }
+        if ($null -eq $n) {
+            # Interval attributes arrive as an IADsLargeInteger COM object, not a number.
+            # Ask the directory entry to convert it; fall back to the COM properties.
+            try { $n = [int64]$root.ConvertLargeIntegerToInt64($v) } catch { $n = $null }
+        }
+        if ($null -eq $n) {
+            try {
+                $hi = [int64]$v.GetType().InvokeMember('HighPart',[Reflection.BindingFlags]::GetProperty,$null,$v,$null)
+                $lo = [int64]$v.GetType().InvokeMember('LowPart',[Reflection.BindingFlags]::GetProperty,$null,$v,$null)
+                $n = ($hi -shl 32) -bor ($lo -band 0xFFFFFFFF)
+            } catch { return $null }
+        }
         if ($n -eq 0 -or $n -eq -9223372036854775808) { return 0 }
         return [math]::Round([math]::Abs($n) / 10000000)
     }
@@ -411,7 +449,9 @@ Capture 'domainpolicy' @('Get-CimInstance') {
         MachineAccountQuota     = [int]$root.Properties['ms-DS-MachineAccountQuota'].Value
     }
 } 'Default domain password and lockout policy read from the domain root. Fine-grained password policies applied to specific groups are NOT represented here and must be reviewed separately. MachineAccountQuota above zero allows any authenticated user to join machines to the domain.'
+}
 
+if ($dirReason) { NotApplicable 'domainprivilegedgroups' $dirReason } else {
 Capture 'domainprivilegedgroups' @('Get-CimInstance') {
     $root = Get-DomainRoot
     if ($null -eq $root) { throw 'The domain root object could not be read with the collecting account.' }
@@ -423,9 +463,13 @@ Capture 'domainprivilegedgroups' @('Get-CimInstance') {
     $rids = @{ 512='Domain Admins'; 519='Enterprise Admins'; 518='Schema Admins';
                548='Account Operators'; 551='Backup Operators'; 544='Administrators';
                550='Print Operators'; 549='Server Operators' }
+    # objectSid is binary, so a wildcard string filter never matches. Build the exact SID:
+    # domain groups hang off the domain SID, the built-in operator groups off S-1-5-32.
+    $domainSid = New-Object System.Security.Principal.SecurityIdentifier(([byte[]]$root.Properties['objectSid'].Value), 0)
     $out = @()
     foreach ($rid in $rids.Keys) {
-        $searcher.Filter = "(&(objectClass=group)(objectSid=*-$rid))"
+        $sid = if ($rid -ge 544 -and $rid -le 551) { "S-1-5-32-$rid" } else { "$($domainSid.Value)-$rid" }
+        $searcher.Filter = "(&(objectClass=group)(objectSid=$sid))"
         $found = $null
         try { $found = $searcher.FindOne() } catch {}
         if ($null -eq $found) { continue }
@@ -434,6 +478,7 @@ Capture 'domainprivilegedgroups' @('Get-CimInstance') {
         $out += [pscustomobject]@{
             GroupName    = $rids[$rid]
             Rid          = $rid
+            Sid          = $sid
             MemberCount  = $members.Count
             Members      = @($members | Select-Object -First 60)
             Truncated    = ($members.Count -gt 60)
@@ -441,6 +486,7 @@ Capture 'domainprivilegedgroups' @('Get-CimInstance') {
     }
     $out
 } 'Membership of well-known privileged directory groups, resolved by relative identifier so a renamed group is still found. Nested group membership is NOT expanded, so the real effective count may be higher. Membership is not itself a finding; excessive or stale membership is, and that requires client confirmation.'
+}
 
 Capture 'domaintrusts' @('Get-CimInstance') {
     $d = $null
@@ -458,6 +504,7 @@ Capture 'domaintrusts' @('Get-CimInstance') {
     if ($out.Count -eq 0) { [pscustomobject]@{ SourceName=[string]$d.Name; TargetName=$null; TrustDirection='None'; TrustType='NoTrustsFound' } } else { $out }
 } 'Trust relationships visible from this domain. SID filtering and selective authentication state are NOT read here and must be confirmed separately before any trust is described as a risk.'
 
+if ($dirReason) { NotApplicable 'kerberospolicy' $dirReason } else {
 Capture 'kerberospolicy' @('Get-CimInstance') {
     $root = Get-DomainRoot
     if ($null -eq $root) { throw 'The domain root object could not be read with the collecting account.' }
@@ -467,15 +514,43 @@ Capture 'kerberospolicy' @('Get-CimInstance') {
         $policy = New-Object System.DirectoryServices.DirectoryEntry("LDAP://CN={31B2F340-016D-11D2-945F-00C04FB984F9},CN=Policies,CN=System,$dn")
         $null = $policy.Guid
     } catch { $policy = $null }
+    # Ticket policy lives in the Default Domain Policy security template, not in LDAP.
+    $kp = @{}
+    $domainName = [string]$machine.Domain
+    $gptRel = "Policies\{31B2F340-016D-11D2-945F-00C04FB984F9}\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf"
+    $gptPaths = @()
+    if ($machine.DomainRole -ge 4) { $gptPaths += (Join-Path $env:SystemRoot ("SYSVOL\sysvol\" + $domainName + "\" + $gptRel)) }
+    $gptPaths += ("\\" + $domainName + "\SYSVOL\" + $domainName + "\" + $gptRel)
+    $gptRead = $null
+    foreach ($gp in $gptPaths) {
+        try {
+            if (Test-Path -LiteralPath $gp) {
+                $inSection = $false
+                foreach ($line in (Get-Content -LiteralPath $gp -ErrorAction Stop)) {
+                    if ($line -match '^\s*\[(.+)\]\s*$') { $inSection = ($Matches[1] -eq 'Kerberos Policy'); continue }
+                    if ($inSection -and $line -match '^\s*(\w+)\s*=\s*(-?\d+)') { $kp[$Matches[1]] = [int]$Matches[2] }
+                }
+                $gptRead = $gp; break
+            }
+        } catch {}
+    }
+    function KpVal([string]$k) { if ($kp.ContainsKey($k)) { $kp[$k] } else { $null } }
     [pscustomobject]@{
         DefaultDomainPolicyReadable = ($null -ne $policy)
         DefaultDomainPolicyPath     = if ($policy) { [string]$policy.Path } else { $null }
+        TicketPolicySource          = $gptRead
+        MaxTicketAgeHours           = KpVal 'MaxTicketAge'
+        MaxRenewAgeDays             = KpVal 'MaxRenewAge'
+        MaxServiceAgeMinutes        = KpVal 'MaxServiceAge'
+        MaxClockSkewMinutes         = KpVal 'MaxClockSkew'
+        TicketValidateClient        = KpVal 'TicketValidateClient'
         SupportedEncryptionTypes    = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters' 'SupportedEncryptionTypes'
         RequireStrongKey            = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' 'RequireStrongKey'
         RequireSignOrSeal           = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' 'RequireSignOrSeal'
         SealSecureChannel           = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' 'SealSecureChannel'
     }
-} 'Kerberos and secure-channel settings as they apply to this host. Ticket lifetime policy lives inside the Default Domain Policy Group Policy object and is not parsed here; this records only whether that object is readable, plus the host-side encryption and secure-channel values.'
+} 'Kerberos ticket policy parsed from the Default Domain Policy security template (GptTmpl.inf, Kerberos Policy section) when SYSVOL is readable from this host, plus the host-side encryption and secure-channel values. Null ticket fields mean the template could not be read from this host, not that no policy exists.'
+}
 
 Capture 'gpoapplied' @('Get-ItemProperty') {
     # The History hive records the last successful policy application, keyed by
@@ -536,6 +611,7 @@ Capture 'pointandprint' @('Get-ItemProperty') {
     [pscustomobject]@{
         SpoolerState                            = if ($spooler) { [string]$spooler.State } else { $null }
         SpoolerStartMode                        = if ($spooler) { [string]$spooler.StartMode } else { $null }
+        SpoolerRunning                          = if ($spooler -and [string]$spooler.State -eq 'Running') { 1 } else { 0 }
         RestrictDriverInstallationToAdministrators = Get-RegValue $pp 'RestrictDriverInstallationToAdministrators'
         NoWarningNoElevationOnInstall           = Get-RegValue $pp 'NoWarningNoElevationOnInstall'
         UpdatePromptSettings                    = Get-RegValue $pp 'UpdatePromptSettings'
@@ -621,7 +697,12 @@ function Get-NetshField { param([string]$Text,[string]$Key)
     $m=[regex]::Match($Text,"(?im)^\s*$([regex]::Escape($Key))\s*:\s*(.+?)\s*$"); if($m.Success){$m.Groups[1].Value.Trim()}else{$null} }
 try {
     $ifaceText = (& netsh wlan show interfaces 2>&1 | Out-String)
-    if ($ifaceText -match 'no wireless interface' -or $ifaceText -match 'is not running' -or $ifaceText -match 'AutoConfig') {
+    # Presence is positive evidence only: netsh must report at least one interface. Any
+    # error text (service not running, WLAN feature absent on Server, unknown command)
+    # leaves the host recorded as having no wireless interface.
+    $ifCount = [regex]::Match($ifaceText, '(?i)there (?:is|are) (\d+) interface')
+    if ($ifaceText -match 'no wireless interface' -or $ifaceText -match 'is not running' -or $ifaceText -match 'AutoConfig' -or
+        -not $ifCount.Success -or [int]$ifCount.Groups[1].Value -lt 1) {
         $wlanPresent = $false
     } else {
         $wlanPresent = $true
@@ -643,7 +724,7 @@ try {
             $serverVal = $null
             if ($onex) {
                 try {
-                    $tmp = Join-Path $env:TEMP ('wlanprofile_' + [guid]::NewGuid().ToString('N'))
+                    $tmp = Join-Path $env:TEMP ('pkwlan_' + [guid]::NewGuid().ToString('N'))
                     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
                     & netsh wlan export profile name="$n" folder="$tmp" | Out-Null   # no key=clear: no secret exported
                     $xf = Get-ChildItem -LiteralPath $tmp -Filter *.xml -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -716,7 +797,7 @@ $result = [ordered]@{
       timezone=[TimeZoneInfo]::Local.Id;system_uuid=$productUuid;machine_guid=$machineGuid;
       current_build=$regBuild;ubr=$regUbr;full_build=$regFullBuild;display_version=$regDisplay};
     sources=@($records.ToArray());
-    limitations=@('Reference implementation, not validated on the five target Windows platforms.',
+    limitations=@('Lab version, not validated on the five target Windows platforms.',
       'Missing-patch and CVE determination is performed off-host from the recorded servicing level against vendor data; this collector makes no vulnerability claim itself.',
       'Directory evidence covers identity, policy, privileged group membership, trusts and applied policy objects. It does NOT perform attack-path analysis, expand nested group membership, or assess packet capture, application or cloud.',
       'Wireless assessment is host-side 802.11 configuration only (saved profiles, encryption, auto-join, 802.1X server-certificate validation) parsed from netsh with English labels. It does NOT include over-the-air, rogue-AP, evil-twin or controller-side testing, which require a monitor-mode adapter and physical presence.',

@@ -58,14 +58,14 @@ $document=[ordered]@{schema_version='1.0';evidence_kind='NetworkObservations';to
     started_utc=[DateTime]::UtcNow.ToString('o');completed_utc=$null;
     source_asset_id=$source[0].asset_id;source_site_id=$source[0].site_id;source_computer=$env:COMPUTERNAME;source_ip=$sourceIp.ToString();
     source_interface=$bound[0].InterfaceAlias;source_context=$scope.network.source_context;
-    evidence_notice='Operator must verify the source VLAN/routes. No connection remains inconclusive. No automatic vulnerability or severity assignment.';
+    evidence_notice='Operator must verify the source VLAN/routes. A timed-out connection while the target answers ICMP is recorded as ExpectedBlocked (liveness corroborated); any other failed connection remains Inconclusive. No automatic vulnerability or severity assignment.';
     results=@()}
 $rows=New-Object 'System.Collections.Generic.List[object]'
 for ($i=0; $i -lt $paths.Count; $i++) {
     $p=$paths[$i]
     $testId=if($p.PSObject.Properties['test_id'] -and -not [string]::IsNullOrWhiteSpace([string]$p.test_id)){[string]$p.test_id}else{'NET{0:D3}' -f ($i+1)}
     [void]$rows.Add([pscustomobject]@{test_id=$testId;target_ip=$p.target_ip;port=$p.port;expected=$p.expected;
-        connected=$null;outcome='NotAttempted';local_endpoint=$null;elapsed_ms=$null;error=$null;timestamp_utc=$null})
+        connected=$null;host_alive=$null;outcome='NotAttempted';local_endpoint=$null;elapsed_ms=$null;error=$null;timestamp_utc=$null})
 }
 $document.results=@($rows.ToArray())
 Write-Json -Path $OutputPath -Value $document
@@ -84,6 +84,21 @@ foreach ($row in $rows) {
     finally { $client.Close(); if ($async) { $async.AsyncWaitHandle.Close() }; $watch.Stop() }
     $row.outcome='Inconclusive'
     if ($row.connected) { $row.outcome=if ($row.expected -eq 'Reachable') {'ExpectedReachable'} else {'UnexpectedReachable'} }
+    else {
+        # Liveness corroboration: one ICMP echo to the same target. A host that answers ICMP
+        # while the TCP connect timed out is consistent with filtering on that port. An
+        # active refusal (RST) means the port was reached and is closed, which is not
+        # filtering, so that stays Inconclusive.
+        $refused = ([string]$row.error -match '(?i)refused')
+        try {
+            $ping = New-Object Net.NetworkInformation.Ping
+            $reply = $ping.Send([Net.IPAddress]::Parse($row.target_ip), 1500)
+            $row.host_alive = ($reply.Status -eq [Net.NetworkInformation.IPStatus]::Success)
+            $ping.Dispose()
+        } catch { $row.host_alive = $null }
+        if ($refused) { $row.error = [string]$row.error + ' The port was reached and actively refused the connection: a closed port, not a filtered path.' }
+        elseif ($row.expected -eq 'Blocked' -and $row.host_alive -eq $true) { $row.outcome='ExpectedBlocked' }
+    }
     $row.elapsed_ms=$watch.ElapsedMilliseconds; $row.timestamp_utc=[DateTime]::UtcNow.ToString('o')
     $document.results=@($rows.ToArray()); Write-Json -Path $OutputPath -Value $document
     Start-Sleep -Milliseconds 250

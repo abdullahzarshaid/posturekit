@@ -239,7 +239,12 @@ def validate_raw(raw: dict[str, Any], target: dict[str, Any], batch: dict[str, A
             raise ValueError('A truncated source cannot be labelled Collected.')
         if source['status'] in ('Error', 'Unsupported', 'NotApplicable') and (returned or retained):
             raise ValueError('Uncollected source contains rows.')
-        directory_na = source['id'] in DIRECTORY_SOURCE_IDS and not host.get('part_of_domain', False)
+        # Directory sources are NotApplicable off-domain. The three domain-level sources
+        # (policy, privileged groups, Kerberos policy) are also NotApplicable on a
+        # domain-joined host that is not a domain controller, because the collector reads
+        # them once from the DC target (remote sessions on members cannot bind the directory).
+        directory_na = (source['id'] in DIRECTORY_SOURCE_IDS and not host.get('part_of_domain', False)) or (
+            source['id'] in ('domainpolicy', 'domainprivilegedgroups', 'kerberospolicy') and not host.get('is_domain_controller', False))
         if source['status'] == 'NotApplicable' and not directory_na and not (
                 host['is_domain_controller'] and source['id'] in ('localadmins', 'localguest')):
             raise ValueError('Unsupported NotApplicable declaration.')
@@ -461,7 +466,12 @@ def import_network(path: Path, engagement: str) -> tuple[list[dict[str, Any]], d
         expected = row.get('expected')
         if expected not in ('Reachable', 'Blocked'):
             raise ValueError('Invalid network expected state.')
-        if connected and expected == 'Reachable':
+        alive = row.get('host_alive')
+        if alive is not None and type(alive) is not bool:
+            raise ValueError('Network host_alive value must be boolean or null.')
+        if (not connected) and expected == 'Blocked' and alive is True and row.get('outcome') == 'ExpectedBlocked':
+            result, interpretation = 'Pass', 'No TCP connection was established while the target answered ICMP from the same source. This is consistent with the expected block on this port; confirm the filtering control (firewall rule or ACL) before reporting it as segmentation.'
+        elif connected and expected == 'Reachable':
             result, interpretation = 'Pass', 'TCP connection succeeded from the designated source, matching the expected reachable path.'
         elif connected and expected == 'Blocked':
             result, interpretation = 'Fail', 'TCP connection succeeded from a source where the approved expectation was Blocked. Validate service identity and policy before reporting.'
@@ -473,7 +483,7 @@ def import_network(path: Path, engagement: str) -> tuple[list[dict[str, Any]], d
             source_position=str(doc.get('source_context') or ''),
             objective=f"Validate TCP reachability from {doc.get('source_asset_id')} to {row.get('target_ip')}:{row.get('port')}",
             method='Bounded TCP connect from an explicitly approved source; no service payload or authentication.',
-            expected=expected, observed={'connected': connected, 'target_ip': row.get('target_ip'), 'port': row.get('port'),
+            expected=expected, observed={'connected': connected, 'host_alive': alive, 'target_ip': row.get('target_ip'), 'port': row.get('port'),
                                         'local_endpoint': row.get('local_endpoint'), 'elapsed_ms': row.get('elapsed_ms'), 'error': row.get('error')},
             result=result, interpretation=interpretation, validation='Network-path observation; policy and service state require human review.',
             evidence_file=path.name, evidence_pointer=f'results[{index-1}]', evidence_sha256=digest,
@@ -847,7 +857,7 @@ def render_html(assets: list[dict[str, Any]], tests: list[dict[str, Any]], meta:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--batch', type=Path, required=True)
+    parser.add_argument('--batch', type=Path, required=True, action='append', help='Sealed collection batch directory. Repeat for several batches of the same engagement; the first batch holding evidence for an asset is used for that asset.')
     parser.add_argument('--rules', type=Path, default=Path(__file__).with_name('Rules.json'))
     parser.add_argument('--network', type=Path, action='append', default=[])
     parser.add_argument('--updates', type=Path, action='append', default=[])
@@ -864,7 +874,35 @@ def main() -> int:
         if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
             raise ValueError('Output must be a new or empty directory; existing evidence is never overwritten.')
         rules = load_rules(args.rules)
-        assets, tests, meta, artifacts = analyze_batch(args.batch, rules)
+        assets, tests, meta, artifacts = [], [], None, []
+        seen_assets: dict[str, dict[str, Any]] = {}
+        batch_ids: list[str] = []
+        for batch_path in args.batch:
+            b_assets, b_tests, b_meta, b_artifacts = analyze_batch(batch_path, rules)
+            if meta is None:
+                meta = b_meta
+            elif b_meta['engagement_id'] != meta['engagement_id']:
+                raise ValueError('All batches must belong to the same engagement.')
+            batch_ids.append(str(b_meta.get('batch_id')))
+            adopted: set[str] = set()
+            for summary in b_assets:
+                current = seen_assets.get(summary['asset_id'])
+                has_evidence = summary['status'] in ('Complete', 'Partial')
+                if current is None:
+                    seen_assets[summary['asset_id']] = summary
+                    if has_evidence:
+                        adopted.add(summary['asset_id'])
+                elif has_evidence and current['status'] not in ('Complete', 'Partial'):
+                    seen_assets[summary['asset_id']] = summary
+                    adopted.add(summary['asset_id'])
+                elif has_evidence:
+                    current['note'] = (current.get('note') or '') + f" Later batch {b_meta.get('batch_id')} also holds evidence for this asset; the earlier batch was kept."
+            tests.extend(t for t in b_tests if t.get('asset_id') in adopted)
+            artifacts.extend(x for x in b_artifacts if x.get('asset_id') in adopted)
+        assets = list(seen_assets.values())
+        if len(batch_ids) > 1:
+            meta['batch_id'] = ','.join(batch_ids)
+            meta['batch_ids'] = batch_ids
         meta['rules_sha256'] = sha256(args.rules)
         for path in args.network:
             new, artifact = import_network(path.resolve(), meta['engagement_id']); tests.extend(new); artifacts.append(artifact)
@@ -887,9 +925,10 @@ def main() -> int:
             raise ValueError('Duplicate normalized test_id detected.')
         if args.manual:
             artifacts.extend(merge_manual(args.manual.resolve(), tests))
-        out = args.output.resolve(); batch_path = args.batch.resolve()
-        if out == batch_path or batch_path in out.parents or out in batch_path.parents:
-            raise ValueError('Use a report directory separate from the evidence directory.')
+        out = args.output.resolve()
+        for batch_path in [p.resolve() for p in args.batch]:
+            if out == batch_path or batch_path in out.parents or out in batch_path.parents:
+                raise ValueError('Use a report directory separate from the evidence directory.')
         args.output.mkdir(parents=True, exist_ok=True)
         fields = ['test_id','phase','category','site_id','asset_id','source_position','objective','method','control_refs','expected','observed','result',
                   'technical_interpretation','severity','validation','evidence_file','evidence_pointer','evidence_sha256','timestamp_utc','limitations','reference','manual_validation']
