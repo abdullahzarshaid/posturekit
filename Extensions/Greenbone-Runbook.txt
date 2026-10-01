@@ -1,7 +1,7 @@
 NETWORK VULNERABILITY SCANNING - GREENBONE / GVM RUNBOOK
 
 WHAT THIS IS
-The internal and external network vulnerability assessment scope. holds no
+The internal and external network vulnerability assessment scope. This project holds no
 commercial scanner licence and does not need one: Greenbone Community Edition (GVM)
 is free, unlimited, and updated daily. The toolkit does not run or ship a scanner;
 GreenboneImport.py normalizes a report you export from your own authorized GVM
