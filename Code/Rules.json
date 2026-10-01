@@ -914,10 +914,10 @@
       "type": "int",
       "expected": 1,
       "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
-      "applicability": "Only applicable where PowerShell 7 is installed. Configuring the Windows PowerShell policy root does not configure PowerShell 7.",
+      "applicability": "Only applicable where PowerShell 7 is installed (gated on the PowerShellCoreInstalled flag from the same source). Configuring the Windows PowerShell policy root does not configure PowerShell 7.",
       "absent_means": {
-        "result": "Unknown",
-        "interpretation": "No PowerShell 7 policy is configured. Whether that matters depends on whether PowerShell 7 is installed on this host, which the same evidence source records."
+        "result": "Fail",
+        "interpretation": "PowerShell 7 is installed and no script block logging policy is configured for it, so its script activity is not logged."
       },
       "control_refs": [
         {
@@ -931,7 +931,12 @@
           "control_title": "Audit Record Generation"
         }
       ],
-      "phase": "host_configuration"
+      "phase": "host_configuration",
+      "gate": {
+        "field": "PowerShellCoreInstalled",
+        "enabled": 1,
+        "disabled": 0
+      }
     },
     {
       "id": "WLAN01",

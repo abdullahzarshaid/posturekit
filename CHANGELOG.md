@@ -11,6 +11,10 @@ Found on a German-language Windows 11 host in the same lab.
 
 ### Rules (`Code/Rules.json`, still 45 rules)
 - PWD01 and PWD02 wording updated to match; no schema change.
+- LOG03 (PowerShell 7 script block logging) is gated on `PowerShellCoreInstalled` (now 0/1), so a host without PowerShell 7 records Not applicable instead of Unknown.
+
+### Collector, wireless presence
+- `WirelessPresent` is now tri-state: 1 or 0 only when the `netsh wlan` text was understood (English), null otherwise (another display language, an unexpected message). The eight WLAN rules then record Unknown instead of a false "no wireless adapter".
 
 ## 0.6, build 2026-09-29
 

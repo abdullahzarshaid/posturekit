@@ -727,7 +727,7 @@ Capture 'pscorelogging' @('Get-ItemProperty') {
         CoreEnableScriptBlockLogging = Get-RegValue "$b\ScriptBlockLogging" 'EnableScriptBlockLogging'
         CoreEnableModuleLogging      = Get-RegValue "$b\ModuleLogging" 'EnableModuleLogging'
         CoreEnableTranscripting      = Get-RegValue "$b\Transcription" 'EnableTranscripting'
-        PowerShellCoreInstalled      = [bool](Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\PowerShellCore')
+        PowerShellCoreInstalled      = [int][bool](Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\PowerShellCore')
     }
 } 'PowerShell 7 audit logging policy. Configuring the Windows PowerShell policy root does not configure PowerShell 7, so a host with both installed needs both.'
 
@@ -754,7 +754,7 @@ Capture 'lapsconfig' @('Get-ItemProperty') {
 
 # ---- Wireless (Layer A: host-side 802.11 configuration via netsh wlan; no radio/over-the-air) ----
 # Parsed once from netsh text (English labels). Read-only; no PSKs are read or exported.
-$wlanPresent = $false; $wlanIface = $null; $wlanProfiles = @(); $wlanAdapter = $null
+$wlanPresent = $false; $wlanDetermined = $false; $wlanIface = $null; $wlanProfiles = @(); $wlanAdapter = $null
 function Get-NetshField { param([string]$Text,[string]$Key)
     $m=[regex]::Match($Text,"(?im)^\s*$([regex]::Escape($Key))\s*:\s*(.+?)\s*$"); if($m.Success){$m.Groups[1].Value.Trim()}else{$null} }
 try {
@@ -763,11 +763,19 @@ try {
     # error text (service not running, WLAN feature absent on Server, unknown command)
     # leaves the host recorded as having no wireless interface.
     $ifCount = [regex]::Match($ifaceText, '(?i)there (?:is|are) (\d+) interface')
-    if ($ifaceText -match 'no wireless interface' -or $ifaceText -match 'is not running' -or $ifaceText -match 'AutoConfig' -or
-        -not $ifCount.Success -or [int]$ifCount.Groups[1].Value -lt 1) {
-        $wlanPresent = $false
+    # netsh prints localized text. The English phrases below are the only ones understood, so
+    # presence is determined only when one of them matched: a recognised "none" message, or
+    # an interface count. Anything else (another display language, an unexpected message)
+    # leaves presence undetermined and the wireless rules record Unknown, never a false
+    # "no wireless adapter".
+    if ($ifaceText -match 'no wireless interface' -or $ifaceText -match 'is not running' -or $ifaceText -match 'AutoConfig') {
+        $wlanPresent = $false; $wlanDetermined = $true
+    } elseif (-not $ifCount.Success) {
+        $wlanPresent = $false; $wlanDetermined = $false
+    } elseif ([int]$ifCount.Groups[1].Value -lt 1) {
+        $wlanPresent = $false; $wlanDetermined = $true
     } else {
-        $wlanPresent = $true
+        $wlanPresent = $true; $wlanDetermined = $true
         # AKM suite (last octet of 00-0f-ac:NN) indicates PMF: 2=PSK(no PMF), 6=PSK-SHA256(PMF), 8=SAE/WPA3(PMF).
         $akmMatch=[regex]::Match($ifaceText,'(?im)akm\s*=\s*00-0f-ac:0*([0-9]+)')
         $connAkm= if($akmMatch.Success){[int]$akmMatch.Groups[1].Value}else{$null}
@@ -802,7 +810,7 @@ try {
                 Dot1X=$onex; ServerCertValidation=$serverVal }
         }
     }
-} catch { $wlanPresent = $false }
+} catch { $wlanPresent = $false; $wlanDetermined = $false }
 
 Capture 'wirelessadapters' @('netsh') {
     if ($wlanPresent -and $wlanAdapter) { $wlanAdapter } else { }
@@ -829,7 +837,7 @@ Capture 'wirelessposture' @('netsh') {
         elseif (($wlanIface.AkmSuite -eq 2) -or ($wlanIface.Authentication -match 'WPA2')) { $connPmf=$false }
     }
     [pscustomobject]@{
-        WirelessPresent=[int]([bool]$wlanPresent)
+        WirelessPresent=if ($wlanDetermined) { [int]([bool]$wlanPresent) } else { $null }
         ProfilesTotal=@($wlanProfiles).Count
         OpenNetworkCount=$open.Count
         OpenAutoConnectCount=$openAuto.Count
@@ -841,7 +849,7 @@ Capture 'wirelessposture' @('netsh') {
         ConnectedAuthWpa2OrBetter=$connOk
         ConnectedManagementFrameProtection=$connPmf
     }
-} 'Aggregated host-side wireless posture used by the WLAN rules. Over-the-air, rogue-AP and evil-twin testing require a monitor-mode adapter and physical presence, and are a separate layer.'
+} 'Aggregated host-side wireless posture used by the WLAN rules. WirelessPresent is 1 or 0 only when the netsh output was understood (English text); it is null when it was not, for example on another display language, and the wireless rules then record Unknown. Over-the-air, rogue-AP and evil-twin testing require a monitor-mode adapter and physical presence, and are a separate layer.'
 
 $complete=@($records | Where-Object { $_.status -notin @('Collected','NotApplicable') }).Count -eq 0
 $coverage=if ($complete) {'Complete'} else {'Partial'}
