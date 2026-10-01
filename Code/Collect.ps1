@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 PostureKit | version 0.6
 Read-only Windows evidence collector. No remediation, downloads, remote discovery,
