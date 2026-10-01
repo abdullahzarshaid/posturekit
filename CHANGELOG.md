@@ -2,6 +2,35 @@
 
 All notable changes to PostureKit. The schema version of the evidence files is unchanged (1.0), so batches collected with earlier 0.6 builds still analyze.
 
+## 0.6, build 2026-10-01 release candidate 2
+
+Corrections from an independent review of the 1 October build. The Python suite is now 182 tests, and a PowerShell fixture suite (`Code/CollectorHelperTests.ps1`, 79 checks) exercises the pure wireless helpers of the collector under Windows PowerShell 5.1 with no adapter, no `netsh` call and no pre-shared key involved. Schema version 1.0, tool version 0.6, the 45 sources and the 45 rules are unchanged.
+
+### Shared evidence gate (`Code/EvidenceGate.py`)
+- One verification entry point (scope, ledger, digests) is used by `Analyze.py`, `PatchCheck.py` and `SoftwareCheck.py`. A folder without `Batch.json` and `Scope.json` is refused by all three.
+- Every enabled target in the scope is accounted for by the patch and software engines: NotAttempted, Excluded and EvidenceRejected hosts appear in the `hosts` list with the reason.
+- `ToFindings.py` builds asset coverage gaps from `Coverage.csv` and `Evidence.json`, so a scoped host with no rule rows still appears as a gap and a Partial host lists the sources that were not usable. An explicitly supplied `--patch` or `--software` path that does not exist is recorded as a required-input gap and the run exits 4.
+
+### Collector, wireless states (`Code/Collect.ps1`)
+- Wireless presence is decided from the `netsh` text and the adapter list together: 1 when `netsh` reports an interface, 0 only when no 802.11 adapter is listed, otherwise null with `WirelessPresenceBasis` stating why. A stopped WLAN service or non-English text is not treated as proof of absence; null makes the eight WLAN rules Unknown.
+- Profile enumeration that fails or is not understood records the `wirelessprofiles` source as Error, never as an empty list. Profile names are used exactly as `netsh` prints them (a trailing space was previously trimmed and the profile read as open), and console output is UTF-8 around the `netsh` calls. A profile whose settings could not be read is counted in `UnreadableProfileCount` (names listed) and never as Open; when any profile is unreadable and no open profile was found, `OpenNetworkCount` and `OpenAutoConnectCount` are null so WLAN01 and WLAN06 record Unknown.
+- 802.1X server-certificate validation is parsed from the profile XML by EAP method (PEAP: `PerformServerValidation`; EAP-TLS and EAP-TTLS: the `ServerValidation` block with its prompt flag and trusted roots) with three states and a stated basis. `TrustedRootCount` and `ServerNamesPresent` are recorded separately. Only a profile whose validation is exactly false counts as unvalidated; unknown ones are counted in `EnterpriseServerValidationUnknownCount`, and WLAN04 records Unknown when only unknowns exist.
+- Management-frame protection is true only for an AKM suite that mandates it (5, 6, 8, 9, 11, 12, 13, 18, 19, 20); any other suite gives null with `ConnectedPmfBasis`, because `netsh` does not expose the RSN capability bits. WLAN08 records Unknown on plain WPA2-PSK.
+- WLAN07 evaluates `CorporatePskNetworkCount`, the saved pre-shared-key profiles whose SSID is on the engagement's corporate list. The list comes from the scope (`wireless.corporate_ssids`), the launcher parameter `-CorporateSsids` or the `POSTUREKIT_CORPORATE_SSIDS` environment variable, in that order, and is passed to the collector as an argument so it also works over WinRM; `CorporateSsidSource` is recorded. Without a list WLAN07 records Unknown and the total PSK count stays an observation.
+
+### Patch findings (`Extensions/PatchCheck.py`, `Extensions/ToFindings.py`)
+- The remediation names the highest fixed build on the host's own servicing branch found in the result, with the vendor-data date, and states that the applicable current update and supersedence must be confirmed from the vendor catalogue; it no longer names the build of the worst-scoring CVE. KB references are listed as references, not as required packages, and the description counts the CVEs carried by the outstanding cumulative-update stream rather than "security updates".
+- When the CISA catalogue was unavailable the exploitability text says so; when it was available the text carries the snapshot date. Each patch finding points to its own host block (`hosts[n]`) with the host build and the feed date, and the window limitation is carried into the finding.
+
+### Importer completeness
+- Greenbone `scan_complete` is tri-state: true only for Done with an end time, false for Running and similar, null when the export carries no status. The analyzer emits a `VULN.SCAN` row (Observation, Inconclusive or Not tested) so the findings draft carries scan completeness as a coverage gap and a review item.
+- Controller intake accepts `unknown` and `not_supported` for rogue detection, WIPS, client isolation and PMF, plus field notes; unknown values give Unknown results, never Fail.
+- Air import records the bands observed per channel and a limitation when only one band was captured.
+
+### Analyst dispositions and sealing
+- `ToFindings.py --dispositions <csv>` (template `Templates/ReviewDispositions.csv`) records ConfirmedFinding, RejectedCandidate, EvidenceGap, ApprovedException or Pending against every review-queue row, with reviewer, timestamp and hashed evidence; counts carry `dispositions_recorded` and `pending`.
+- `Code/SealDerived.py` regenerates `Manifest.txt` for a derived output folder after all post-processing, so `findings.json` and the review files are covered; it refuses a raw batch folder.
+
 ## 0.6, build 2026-10-01
 
 Found on a German-language Windows 11 host in the same lab.

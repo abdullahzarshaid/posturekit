@@ -39,6 +39,11 @@ import re
 import sys
 from datetime import datetime, timezone
 
+# Scope.json / Batch.json validation and per-target accounting are shared with
+# Analyze.py and PatchCheck.py (Code\EvidenceGate.py).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Code"))
+import EvidenceGate  # noqa: E402
+
 CATALOG_DATE = "2026-09"   # review quarterly
 
 # --- 1. End-of-life: any installed version of these product lines is unsupported
@@ -273,11 +278,13 @@ def main():
                         help="skip the KEV product-presence overlay")
     arguments = parser.parse_args()
 
-    host_files = sorted(n for n in os.listdir(arguments.batch)
-                        if n.startswith("Host.") and n.lower().endswith(".json"))
-    if not host_files:
-        raise SystemExit("No Host.*.json in %s. Nothing was collected from this "
-                         "target." % arguments.batch)
+    try:
+        gate = gate_hosts(arguments.batch)
+    except ValueError as exc:
+        raise SystemExit("Refusing to assess %s: %s" % (arguments.batch, exc))
+    if not gate:
+        raise SystemExit("No target is accounted for in %s. Nothing was collected from this "
+                         "batch." % arguments.batch)
     batch_name = os.path.basename(os.path.abspath(arguments.batch))
 
     kev_products = set() if arguments.no_kev else _kev_products(arguments.cache)
@@ -301,10 +308,12 @@ def main():
         "status": None,
         "hosts": [],
     }
-    for name in host_files:
-        host_document = _read_json(os.path.join(arguments.batch, name))
-        result["hosts"].append(assess_host(host_document, kev_products, kev_limitation,
-                                           batch_name))
+    for gate_host in gate:
+        if gate_host["status"] == "Accepted":
+            result["hosts"].append(assess_host(gate_host["document"], kev_products,
+                                               kev_limitation, batch_name))
+        else:
+            result["hosts"].append(_unassessed(gate_host, batch_name))
 
     # The first host is mirrored at the top level for backward compatibility.
     first = result["hosts"][0]
@@ -317,9 +326,101 @@ def main():
     statuses = [h["status"] for h in result["hosts"]]
     if "RiskySoftware" in statuses:
         return 1
-    if "Unknown" in statuses:
+    if any(s in ("Unknown", "EvidenceRejected", "NotAttempted") for s in statuses):
         return 2
     return 0
+
+
+def gate_hosts(batch):
+    """Account for every target in the approved scope of a sealed batch.
+
+    Same contract as PatchCheck.gate_hosts: one dict per approved target with
+    status Accepted (digest verified, document loaded), EvidenceRejected,
+    NotAttempted or Excluded, plus the ledger reason. A Host file on disk that
+    no accepted ledger entry covers is EvidenceRejected, never assessed.
+    Raises ValueError when Batch.json or Scope.json is missing or invalid.
+    """
+    gate = EvidenceGate.verify_batch(batch)
+    on_disk = {}
+    for name in sorted(os.listdir(batch)):
+        if name.startswith("Host.") and name.lower().endswith(".json"):
+            try:
+                on_disk[name] = _read_json(os.path.join(batch, name))
+            except SystemExit:
+                on_disk[name] = None
+    claimed = set()
+    hosts = []
+    for entry in gate["hosts"]:
+        asset_id = entry["asset_id"]
+        record = {"asset_id": asset_id, "status": None, "evidence_file": entry.get("evidence_file"),
+                  "document": None, "reason": entry.get("reason"), "ledger_status": entry.get("status")}
+        if entry["status"] == "Excluded":
+            record["status"] = "Excluded"
+        elif entry["status"] == "EvidenceRejected":
+            record["status"] = "EvidenceRejected"
+            if entry.get("digest_ok") is False:
+                record["reason"] = ("evidence digest mismatch: SHA-256 of %s does not equal the "
+                                    "evidence_sha256 recorded for asset %s in Batch.json"
+                                    % (entry.get("evidence_file"), asset_id))
+            claimed.add(entry.get("evidence_file"))
+        elif entry["status"] in ("Complete", "Partial"):
+            name = entry["evidence_file"]
+            claimed.add(name)
+            document = on_disk.get(name)
+            if document is None:
+                record.update(status="EvidenceRejected", reason="%s could not be read" % name)
+            else:
+                record.update(status="Accepted", document=document)
+        else:
+            record["status"] = "NotAttempted"
+            unsealed = [n for n, d in on_disk.items()
+                        if n not in claimed and isinstance(d, dict) and str(d.get("asset_id")) == str(asset_id)]
+            if unsealed:
+                claimed.add(unsealed[0])
+                record.update(status="EvidenceRejected", evidence_file=unsealed[0],
+                              reason="no ledger entry in Batch.json for asset %s (%s): the file is present "
+                                     "but not sealed, so it cannot be verified" % (asset_id, unsealed[0]))
+        hosts.append(record)
+    for name, document in on_disk.items():
+        if name in claimed:
+            continue
+        asset_id = document.get("asset_id") if isinstance(document, dict) else None
+        hosts.append({"asset_id": asset_id, "status": "EvidenceRejected", "evidence_file": name,
+                      "document": None, "ledger_status": None,
+                      "reason": "no ledger entry in Batch.json for asset %s (%s) and the asset is not in "
+                                "the approved scope" % (asset_id, name)})
+    return hosts
+
+
+def _unassessed(gate_host, batch_name):
+    """Per-host record for a target that produced no verified inventory:
+    EvidenceRejected, NotAttempted or Excluded, with the reason. Never clean."""
+    status = gate_host["status"]
+    result = {
+        "asset_id": gate_host.get("asset_id"),
+        "computer_name": gate_host.get("asset_id"),
+        "source_batch": batch_name,
+        "inventory_status": None,
+        "status": status,
+        "ledger_status": gate_host.get("ledger_status"),
+        "evidence_file": gate_host.get("evidence_file"),
+        "rejection_reason": gate_host.get("reason"),
+        "items": [],
+        "counts": {},
+        "limitations": [],
+    }
+    if status == "Excluded":
+        result["limitations"].append("Excluded by the approved scope; not assessed.")
+    elif status == "EvidenceRejected":
+        result["limitations"].append(
+            "Evidence rejected: %s. No software determination was made for this host "
+            "and it must not be presented as assessed." % gate_host.get("reason"))
+    else:
+        result["limitations"].append(
+            "No verified host evidence for this target (ledger status %s: %s). Third-party "
+            "software was not assessed. This is NOT evidence that the host carries no "
+            "outdated software." % (gate_host.get("ledger_status") or "absent", gate_host.get("reason")))
+    return result
 
 
 def software_inventory(host_document):
@@ -414,6 +515,8 @@ def _write(output_dir, result):
         counts = host.get("counts", {})
         print("Host                : %s" % (host.get("computer_name") or host.get("asset_id")))
         print("Status              : %s" % host["status"])
+        if host.get("rejection_reason"):
+            print("Reason              : %s" % host["rejection_reason"])
         if counts:
             print("Inventory / flagged : %d / %d" % (counts.get("inventory_size", 0),
                                                       counts.get("flagged", 0)))

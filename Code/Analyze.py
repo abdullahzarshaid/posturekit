@@ -22,6 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# The batch input contract (Scope.json + Batch.json validation and per-target
+# accounting) is shared with PatchCheck.py and SoftwareCheck.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import EvidenceGate  # noqa: E402
+
 VERSION = "0.6"
 SOURCE_IDS = {
     'firewall', 'smbserver', 'smbclient', 'rdp', 'uac', 'localadmins',
@@ -364,58 +369,30 @@ def evaluate_rule(rule: dict[str, Any], sources: dict[str, dict[str, Any]], asse
 
 def analyze_batch(batch_dir: Path, rule_doc: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
     batch_dir = batch_dir.resolve()
-    batch = read_json(safe_child(batch_dir, 'Batch.json'))
-    scope_path = safe_child(batch_dir, 'Scope.json')
-    scope = read_json(scope_path)
-    if batch.get('schema_version') != '1.0' or batch.get('tool_version') != VERSION or batch.get('evidence_kind') != 'CollectionBatch':
-        raise ValueError('Unsupported batch schema or tool version.')
-    if scope.get('schema_version') != '1.0' or scope.get('approved_for_lab') is not True:
-        raise ValueError('Missing approved lab scope.')
-    if batch.get('scope_sha256') != sha256(scope_path) or batch.get('engagement_id') != scope.get('engagement_id'):
-        raise ValueError('Scope digest or engagement mismatch.')
-    targets = scope.get('targets')
-    if not isinstance(targets, list) or not 1 <= len(targets) <= 20:
-        raise ValueError('This tool expects 1-20 scoped assets.')
-    approved: dict[str, dict[str, Any]] = {}
-    folded: set[str] = set()
-    for target in targets:
-        if not isinstance(target, dict):
-            raise ValueError('Target is not an object.')
-        for key in ('asset_id', 'site_id', 'computer_name'):
-            if not isinstance(target.get(key), str) or not ID_RE.fullmatch(target[key]):
-                raise ValueError(f'Invalid target {key}.')
-        if type(target.get('enabled')) is not bool or target['asset_id'].casefold() in folded:
-            raise ValueError('Invalid enabled flag or duplicate asset ID.')
-        folded.add(target['asset_id'].casefold())
-        approved[target['asset_id']] = target
-    entries = batch.get('targets')
-    if not isinstance(entries, list) or len(entries) > 20:
-        raise ValueError('Invalid batch target list.')
-    indexed: dict[str, dict[str, Any]] = {}
-    for entry in entries:
-        if not isinstance(entry, dict) or entry.get('asset_id') not in approved or entry['asset_id'] in indexed:
-            raise ValueError('Unknown or duplicate target in batch ledger.')
-        if entry.get('status') not in TARGET_STATUSES:
-            raise ValueError('Unrecognized batch target status.')
-        target = approved[entry['asset_id']]
-        if entry.get('site_id') != target['site_id'] or str(entry.get('computer_name', '')).casefold() != target['computer_name'].casefold():
-            raise ValueError('Batch ledger identity mismatch.')
-        indexed[entry['asset_id']] = entry
+    # Scope/ledger validation and per-target accounting are the shared contract
+    # in EvidenceGate; the host-record validation and rule evaluation stay here.
+    gate = EvidenceGate.verify_batch(batch_dir)
+    batch = gate['batch']
+    targets = gate['targets']
+    approved = {target['asset_id']: target for target in targets}
+    indexed = gate['ledger']
     assets: list[dict[str, Any]] = []
     tests: list[dict[str, Any]] = []
     artifacts: list[dict[str, Any]] = []
-    for asset_id, target in approved.items():
+    for gate_host in gate['hosts']:
+        asset_id = gate_host['asset_id']
+        target = approved[asset_id]
         entry = indexed.get(asset_id, {})
         summary = {'asset_id': asset_id, 'site_id': target['site_id'], 'computer_name': target['computer_name'],
                    'status': 'NotAttempted', 'evidence': None, 'note': 'No completed collection available.'}
-        if not target['enabled']:
+        if gate_host['status'] == 'Excluded':
             summary.update(status='Excluded', note='Excluded by the approved scope.')
-        elif entry.get('status') in ('Complete', 'Partial'):
+        elif gate_host['status'] == 'EvidenceRejected':
+            summary.update(status='EvidenceRejected', note=gate_host['reason'])
+        elif gate_host['status'] in ('Complete', 'Partial'):
             try:
-                path = safe_child(batch_dir, entry.get('evidence_file'))
-                digest = sha256(path)
-                if digest != entry.get('evidence_sha256'):
-                    raise ValueError('Evidence digest mismatch.')
+                path = safe_child(batch_dir, gate_host['evidence_file'])
+                digest = gate_host['evidence_sha256']
                 raw = read_json(path)
                 sources = validate_raw(raw, target, batch)
                 complete = (entry['status'] == 'Complete' and raw['collection_status'] == 'Complete' and
@@ -430,7 +407,7 @@ def analyze_batch(batch_dir: Path, rule_doc: dict[str, Any]) -> tuple[list[dict[
             except (ValueError, OSError, KeyError, TypeError, RecursionError) as exc:
                 summary.update(status='EvidenceRejected', note=str(exc))
         else:
-            summary.update(status=entry.get('status', 'NotAttempted'), note=entry.get('error') or summary['note'])
+            summary.update(status=gate_host['status'] or 'NotAttempted', note=gate_host['reason'] or summary['note'])
         assets.append(summary)
     meta = {
         'engagement_id': batch['engagement_id'], 'batch_id': batch.get('batch_id'),
@@ -774,17 +751,39 @@ def import_wireless_controller(path: Path, engagement: str) -> tuple[list[dict[s
                          evidence_file=path.name, evidence_pointer='controller/wlans', evidence_sha256=digest, timestamp_utc=ts,
                          limitations='Configuration review only; does not prove runtime enforcement.', reference='Wireless controller configuration (Layer C)')
 
-    tests.append(rec('CTRL.rogue_detection', 'Controller rogue-access-point detection is enabled',
-                     'Pass' if controller.get('rogue_detection_enabled') else 'Fail',
-                     {'rogue_detection_enabled': controller.get('rogue_detection_enabled')},
-                     'Rogue-AP detection identifies unauthorized radios impersonating corporate SSIDs.'))
-    tests.append(rec('CTRL.wips', 'Wireless intrusion prevention (WIPS) is enabled',
-                     'Pass' if controller.get('wips_enabled') else 'Fail',
-                     {'wips_enabled': controller.get('wips_enabled')},
-                     'WIPS detects and can contain over-the-air attacks such as evil twins and deauthentication floods.'))
+    controller_notes = controller.get('field_notes') if isinstance(controller.get('field_notes'), dict) else {}
+
+    def observed_with_note(observed, notes, field):
+        # A source_note recorded by the operator (where the value came from, or why it
+        # is unknown) travels with the result so the reviewer sees it next to the value.
+        note = notes.get(field) if isinstance(notes, dict) else None
+        if isinstance(note, str) and note.strip():
+            observed = dict(observed); observed['source_note'] = note.strip()
+        return observed
+
+    def tri_state(value, field, pass_text):
+        # true -> Pass, false -> Fail; null, "unknown", "not_supported" or an absent
+        # field -> Unknown with the reason. An unknown control state is never a Fail.
+        if value is True:
+            return 'Pass', pass_text
+        if value is False:
+            return 'Fail', pass_text
+        label = 'absent from the intake' if value is None else 'recorded as %r' % (value,)
+        return 'Unknown', '%s is %s, so the control state cannot be determined from this intake; confirm it on the controller.' % (field, label)
+
+    for field, tid, obj, text in (
+            ('rogue_detection_enabled', 'CTRL.rogue_detection', 'Controller rogue-access-point detection is enabled',
+             'Rogue-AP detection identifies unauthorized radios impersonating corporate SSIDs.'),
+            ('wips_enabled', 'CTRL.wips', 'Wireless intrusion prevention (WIPS) is enabled',
+             'WIPS detects and can contain over-the-air attacks such as evil twins and deauthentication floods.')):
+        value = controller.get(field)
+        result, interp = tri_state(value, field, text)
+        tests.append(rec(tid, obj, result, observed_with_note({field: value}, controller_notes, field), interp))
     for i, w in enumerate(wlans, 1):
         ssid = str(w.get('ssid') or f'wlan{i}'); purpose = str(w.get('purpose') or ''); sec = str(w.get('security') or '')
-        pmf = str(w.get('pmf') or ''); vlan = w.get('vlan'); iso = w.get('client_isolation')
+        pmf = w.get('pmf'); pmf = str(pmf).strip().lower() if isinstance(pmf, str) else pmf
+        vlan = w.get('vlan'); iso = w.get('client_isolation')
+        wlan_notes = w.get('field_notes') if isinstance(w.get('field_notes'), dict) else {}
         base = f'CTRL.{i}'
         if sec == 'open':
             tests.append(rec(f'{base}.open', f"WLAN '{ssid}' is not an open (unencrypted) network", 'Fail',
@@ -794,9 +793,10 @@ def import_wireless_controller(path: Path, engagement: str) -> tuple[list[dict[s
                              'Pass' if 'enterprise' in sec else 'Fail', {'ssid': ssid, 'security': sec},
                              'A corporate SSID should authenticate with 802.1X; a shared key is recoverable off any endpoint.'))
         if purpose == 'guest':
-            tests.append(rec(f'{base}.isolation', f"Guest WLAN '{ssid}' enforces client isolation",
-                             'Pass' if iso is True else ('Fail' if iso is False else 'Unknown'), {'ssid': ssid, 'client_isolation': iso},
-                             'Guest client isolation prevents guest devices reaching each other; absence enables lateral movement.'))
+            iso_result, iso_interp = tri_state(iso, 'client_isolation',
+                                               'Guest client isolation prevents guest devices reaching each other; absence enables lateral movement.')
+            tests.append(rec(f'{base}.isolation', f"Guest WLAN '{ssid}' enforces client isolation", iso_result,
+                             observed_with_note({'ssid': ssid, 'client_isolation': iso}, wlan_notes, 'client_isolation'), iso_interp))
             if isinstance(vlan, int) and not corp_known:
                 tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' VLAN separation from corporate", 'Unknown',
                                  {'ssid': ssid, 'vlan': vlan, 'corporate_vlans': sorted(corp_vlans), 'corporate_vlans_known': False},
@@ -813,9 +813,17 @@ def import_wireless_controller(path: Path, engagement: str) -> tuple[list[dict[s
                                  {'ssid': ssid, 'security': sec},
                                  'The guest WLAN authenticates with a shared key. Recorded as an observation; the analyst assigns severity '
                                  'after considering how the key is distributed, rotated and what the guest segment can reach.'))
-        tests.append(rec(f'{base}.pmf', f"WLAN '{ssid}' requires management-frame protection (PMF)",
-                         'Pass' if pmf == 'required' else ('Fail' if pmf == 'disabled' else 'Observation'),
-                         {'ssid': ssid, 'pmf': pmf}, 'PMF (802.11w) resists deauthentication and management-frame spoofing; "optional" leaves legacy clients unprotected.'))
+        if pmf == 'required':
+            pmf_result, pmf_interp = 'Pass', 'PMF (802.11w) resists deauthentication and management-frame spoofing.'
+        elif pmf == 'disabled':
+            pmf_result, pmf_interp = 'Fail', 'PMF (802.11w) resists deauthentication and management-frame spoofing; disabled leaves every client unprotected.'
+        elif pmf == 'optional':
+            pmf_result, pmf_interp = 'Observation', 'PMF (802.11w) resists deauthentication and management-frame spoofing; "optional" leaves legacy clients unprotected.'
+        else:
+            label = 'absent from the intake' if pmf in (None, '') else 'recorded as %r' % (pmf,)
+            pmf_result, pmf_interp = 'Unknown', 'pmf is %s, so the management-frame protection state cannot be determined from this intake; confirm it on the controller.' % label
+        tests.append(rec(f'{base}.pmf', f"WLAN '{ssid}' requires management-frame protection (PMF)", pmf_result,
+                         observed_with_note({'ssid': ssid, 'pmf': pmf}, wlan_notes, 'pmf'), pmf_interp))
     return tests, {'file': path.name, 'sha256': digest, 'kind': 'WirelessControllerConfig', 'asset_id': site}
 
 
@@ -830,6 +838,34 @@ def import_greenbone(path: Path, engagement: str) -> tuple[list[dict[str, Any]],
         raise ValueError('Unexpected Greenbone observation list.')
     ctl = 'NIST SP 800-53 Rev 5 RA-5'
     tests = []
+    # One scan-level row carries the export's completeness into the review queue.
+    # scan_complete is tri-state from the importer: True (Done with an end time),
+    # False (still running or stopped), None (completion could not be established).
+    complete = doc.get('scan_complete')
+    if complete is True:
+        scan_result, scan_interp = 'Observation', 'The scanner task reported Done with an end time, so the export covers the completed scan. Coverage still depends on the scan configuration and feed currency.'
+    elif complete is False:
+        scan_result, scan_interp = 'Inconclusive', 'The export was taken before the scanner task completed, so results are partial and absence of a detection is not evidence.'
+    else:
+        scan_result, scan_interp = 'Not tested', 'The export carries no scan status or end time, so scan completion could not be established; results must not be treated as full coverage.'
+    tests.append(make_test(
+        test_id='VULN.SCAN', phase='active_network', category='network_vulnerability',
+        site_id=str(doc.get('source_site_id') or ''), source_position=str(doc.get('source_position') or ''),
+        objective='Scanner export completeness for %s' % (doc.get('source_position') or 'the scanning position'),
+        method='Imported Greenbone/GVM report generated separately by the operator; this package does not run or ship a scanner.',
+        control_refs=ctl, expected='Scan task Done with a recorded end time',
+        observed={'scan_run_status': doc.get('scan_run_status'), 'progress': doc.get('progress'),
+                  'scan_start': doc.get('scan_start'), 'scan_end': doc.get('scan_end'),
+                  'hosts_count': doc.get('hosts_count'), 'result_count': len(rows),
+                  'result_count_full': doc.get('result_count_full'), 'result_count_filtered': doc.get('result_count_filtered'),
+                  'filter_text': doc.get('filter_text'), 'credentialed_indicator': doc.get('credentialed_indicator'),
+                  'scan_complete': complete, 'scan_completion_basis': doc.get('scan_completion_basis')},
+        result=scan_result, interpretation=scan_interp,
+        validation='Confirm the task status and credential configuration on the scanner before relying on scan coverage.',
+        evidence_file=path.name, evidence_pointer='scan_run_status', evidence_sha256=digest,
+        timestamp_utc=str(doc.get('completed_utc') or ''),
+        limitations='Scan completeness is read from the export metadata; it does not establish that every in-scope host was reachable from the scanning position.',
+        reference='Greenbone/GVM network vulnerability scan'))
     for i, o in enumerate(rows, 1):
         if not isinstance(o, dict):
             raise ValueError('Greenbone observation is not an object.')

@@ -4,7 +4,11 @@
 Input
 -----
   Tests.csv            rule results produced by Analyze.py
+  Coverage.csv         per-asset collection status produced by Analyze.py
+  Evidence.json        optional, the same run's package (source counts per asset)
   MissingUpdates.json  optional, produced by PatchCheck.py
+  SoftwareRisk.json    optional, produced by SoftwareCheck.py
+  ReviewDispositions   optional CSV of analyst dispositions for review rows
 
 Output
 ------
@@ -28,6 +32,12 @@ client's approved baseline and documented exceptions.
 Missing updates are grouped into a single finding per host. A register carrying
 several hundred separate CVE rows is unusable in a report and misrepresents one
 remediation action as hundreds.
+
+Coverage is never silent. Every asset in the approved scope that did not
+produce complete host evidence (NotAttempted, Error, Excluded, EvidenceRejected,
+Partial) is written as a coverage gap carrying its asset_id, and an explicitly
+supplied patch or software input that does not exist is a required-input gap
+with a non-zero exit, never a quiet skip.
 """
 
 import argparse
@@ -35,10 +45,18 @@ import csv
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
 ANALYST = "ANALYST REQUIRED"
+
+# Exit codes. 0: register written and every supplied input was read.
+# 4: register written, but a required input named on the command line was
+#    absent (recorded as a coverage gap). The caller must not treat the draft
+#    as complete.
+EXIT_OK = 0
+EXIT_REQUIRED_INPUT = 4
 
 # Configuration rules mapped to the weakness they evidence. A rule with no entry
 # gets no CWE rather than a guessed one.
@@ -94,6 +112,18 @@ REMEDIATION = {
     "CRED07": "Deploy a managed local administrator password solution with automatic rotation.",
 }
 
+# Analyst dispositions for review-queue rows. The CSV template is
+# Templates\ReviewDispositions.csv; the columns must match it exactly.
+DISPOSITION_FIELDS = ["test_id", "disposition", "rationale", "reviewer",
+                      "timestamp_utc", "evidence_file", "evidence_sha256"]
+DISPOSITIONS = ("ConfirmedFinding", "RejectedCandidate", "EvidenceGap",
+                "ApprovedException", "Pending")
+PENDING = {"disposition": "Pending"}
+
+KB_LABEL = "KB references of the latest fixes in the evaluated window"
+COVERAGE_COMPLETE = ("Complete",)
+COVERAGE_USABLE = ("Complete", "Partial")
+
 
 def _read_json(path):
     with open(path, "rb") as handle:
@@ -104,6 +134,14 @@ def _read_json(path):
         except (UnicodeDecodeError, ValueError):
             continue
     raise SystemExit("Cannot decode JSON: %s" % path)
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _severity_from_score(score):
@@ -118,6 +156,16 @@ def _severity_from_score(score):
     if score > 0.0:
         return "Low"
     return None
+
+
+def _build_tuple(text):
+    """'10.0.20348.3' -> (10, 0, 20348, 3); None when unparseable."""
+    if not text:
+        return None
+    parts = str(text).strip().split(".")
+    if not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
 
 
 def _config_findings(rows):
@@ -289,6 +337,224 @@ def _review_gaps(rows, start_index):
     return gaps
 
 
+# ------------------------------------------------------------ asset coverage
+def _read_coverage(derived):
+    """Per-asset collection status from Coverage.csv, enriched with the source
+    counts Evidence.json carries for the same asset when it is present.
+
+    Returns [] when Coverage.csv is absent (an older derived folder, or a
+    Tests.csv assembled by hand). Assets that appear only in Evidence.json are
+    included too, so neither file can hide an asset the other knows about.
+    """
+    path = os.path.join(derived, "Coverage.csv")
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    detail = {}
+    evidence_path = os.path.join(derived, "Evidence.json")
+    if os.path.isfile(evidence_path):
+        try:
+            package = _read_json(evidence_path)
+        except SystemExit:
+            package = {}
+        for item in (package.get("coverage") or []) if isinstance(package, dict) else []:
+            if isinstance(item, dict) and item.get("asset_id"):
+                detail[str(item["asset_id"])] = item
+    assets = []
+    seen = set()
+    for row in rows:
+        asset = (row.get("asset_id") or "").strip()
+        if not asset:
+            continue
+        entry = {"asset_id": asset, "site_id": (row.get("site_id") or "").strip(),
+                 "computer_name": (row.get("computer_name") or "").strip(),
+                 "status": (row.get("status") or "").strip(), "evidence": (row.get("evidence") or "").strip(),
+                 "note": (row.get("note") or "").strip(), "sources_collected": None, "sources_total": None}
+        extra = detail.get(asset, {})
+        for key in ("sources_collected", "sources_total"):
+            if type(extra.get(key)) is int:
+                entry[key] = extra[key]
+        assets.append(entry)
+        seen.add(asset)
+    for asset, item in detail.items():
+        if asset in seen:
+            continue
+        assets.append({"asset_id": asset, "site_id": str(item.get("site_id") or ""),
+                       "computer_name": str(item.get("computer_name") or ""),
+                       "status": str(item.get("status") or ""), "evidence": str(item.get("evidence") or ""),
+                       "note": str(item.get("note") or ""),
+                       "sources_collected": item.get("sources_collected") if type(item.get("sources_collected")) is int else None,
+                       "sources_total": item.get("sources_total") if type(item.get("sources_total")) is int else None})
+    return assets
+
+
+_SOURCE_POINTER = re.compile(r"sources\[id=([^\]]+)\]")
+
+
+def _unusable_sources(rows, asset):
+    """Source ids whose rule results for this asset show the source was not
+    usable: Error, Unsupported (Not tested) or absent. Read from the evidence
+    pointer of each row, so it names real sources rather than guessing."""
+    out = set()
+    for row in rows:
+        if (row.get("asset_id") or "") != asset:
+            continue
+        match = _SOURCE_POINTER.match(row.get("evidence_pointer") or "")
+        if not match:
+            continue
+        result = row.get("result")
+        interpretation = row.get("technical_interpretation") or ""
+        if result in ("Error", "Not tested") or (result == "Unknown" and "absent" in interpretation):
+            out.add(match.group(1))
+    return sorted(out)
+
+
+def _asset_coverage_gaps(assets, rows, start_index):
+    """One coverage gap per scoped asset that did not produce complete evidence.
+
+    NotAttempted, Error, Pending, Excluded and EvidenceRejected assets get a gap
+    stating the ledger's own note. Partial assets get a gap stating how many
+    sources were usable and which sources the rule results show as unusable.
+    Every gap carries asset_id so a consumer can join it back to the scope.
+    """
+    titles = {
+        "NotAttempted": "Scoped asset was not collected",
+        "Error": "Scoped asset collection failed",
+        "Pending": "Scoped asset collection is still pending",
+        "Excluded": "Scoped asset excluded by the approved scope",
+        "EvidenceRejected": "Scoped asset evidence was rejected at the integrity gate",
+        "Partial": "Scoped asset has only partial host evidence",
+    }
+    gaps = []
+    index = start_index
+    for asset in assets:
+        status = asset.get("status") or ""
+        if status in COVERAGE_COMPLETE:
+            continue
+        asset_id = asset["asset_id"]
+        note = asset.get("note") or "no note recorded"
+        title = titles.get(status, "Scoped asset has no usable host evidence")
+        if status == "Partial":
+            collected, total = asset.get("sources_collected"), asset.get("sources_total")
+            if collected is not None and total is not None:
+                counts = "%d of %d sources usable (Collected or NotApplicable)" % (collected, total)
+            else:
+                counts = "source counts not recorded (Evidence.json absent or older)"
+            unusable = _unusable_sources(rows, asset_id)
+            description = (
+                "Asset %s is in the approved scope with collection status Partial: %s. Sources the "
+                "rule results show as Error, Unsupported or absent: %s. Ledger note: %s"
+                % (asset_id, counts, ", ".join(unusable) if unusable else "none identified from the rule results",
+                   note))
+            observed = "Partial collection; checks that depend on the unusable sources made no determination."
+            impact = ("Checks that depend on the uncollected sources are UNASSESSED for this asset. "
+                      "A Pass elsewhere on this host does not extend to them.")
+            remediation = "Re-collect the missing sources on this host, or assess them by another method and record the result."
+        else:
+            description = ("Asset %s is in the approved scope with collection status %s, so no host "
+                           "evidence was evaluated for it. Ledger note: %s" % (asset_id, status or "unrecorded", note))
+            observed = "No host evidence was evaluated for this asset."
+            if status == "Excluded":
+                impact = ("This asset was excluded by the approved scope and is UNASSESSED. It must be listed "
+                          "as out of scope, never counted among assessed hosts.")
+                remediation = "If the asset should be assessed, amend the approved scope and re-collect."
+            else:
+                impact = ("This asset is UNASSESSED. The absence of findings for it is not evidence that it "
+                          "is secure, and it must not be presented or counted as though it were assessed.")
+                remediation = ("Re-collect this asset with the collector, resolve the recorded ledger error, "
+                               "or assess it by another method and record the result.")
+        gaps.append({
+            "id": "GAP-CV-%02d" % index,
+            "kind": "CoverageGap",
+            "title": title,
+            "severity": "Not assessed",
+            "status": "Not tested",
+            "asset_id": asset_id,
+            "affected_assets": [asset_id],
+            "coverage_status": status,
+            "site_id": asset.get("site_id") or None,
+            "computer_name": asset.get("computer_name") or None,
+            "sources_collected": asset.get("sources_collected"),
+            "sources_total": asset.get("sources_total"),
+            "description": description,
+            "observed_result": observed,
+            "impact": impact,
+            "remediation": remediation,
+            "limitations": note,
+            "method": "Collection ledger (Coverage.csv and Evidence.json) against the approved scope.",
+            "validation": "Not determined.",
+        })
+        index += 1
+    return gaps
+
+
+def _scan_gaps(rows, start_index):
+    """A coverage gap for every scan-level row (VULN.SCAN) that is not an
+    Observation: the scanner export was incomplete, or completion could not be
+    established, so its absence of detections must not be read as coverage."""
+    gaps = []
+    index = start_index
+    for row in rows:
+        test_id = row.get("test_id") or ""
+        if row.get("category") != "network_vulnerability" or not test_id.endswith(".SCAN"):
+            continue
+        if row.get("result") == "Observation":
+            continue
+        position = row.get("source_position") or row.get("site_id") or "(scanning position not recorded)"
+        gaps.append({
+            "id": "GAP-SC-%02d" % index,
+            "kind": "CoverageGap",
+            "title": "Scanner export incomplete or completion not established",
+            "severity": "Not assessed",
+            "status": "Not tested",
+            "affected_assets": [position],
+            "source_position": position,
+            "scan_result": row.get("result"),
+            "description": ("The network vulnerability scan export from %s is %s: %s. Observed: %s"
+                            % (position,
+                               "incomplete" if row.get("result") == "Inconclusive" else "of unestablished completion",
+                               row.get("technical_interpretation") or "no interpretation recorded",
+                               row.get("observed") or "")),
+            "observed_result": "Scan completeness was not established as Done with an end time.",
+            "impact": ("Scanner detections from this export are partial at best. Hosts and services without a "
+                       "detection are UNASSESSED by this scan, not clean."),
+            "remediation": "Re-export the report after the scanner task reports Done, or run the scan to completion and import that export.",
+            "limitations": row.get("limitations") or "",
+            "method": "Scan metadata (status, progress, end time) read from the imported export.",
+            "validation": "Not determined.",
+        })
+        index += 1
+    return gaps
+
+
+def _missing_input_gap(kind, path, index):
+    """A required input named on the command line does not exist. This is a
+    coverage failure of the whole register, recorded loudly and never skipped."""
+    label = {"patch": "patch assessment (MissingUpdates.json from PatchCheck.py)",
+             "software": "software assessment (SoftwareRisk.json from SoftwareCheck.py)"}[kind]
+    return {
+        "id": "GAP-IN-%02d" % index,
+        "kind": "CoverageGap",
+        "title": "Required %s input was not found" % kind,
+        "severity": "Not assessed",
+        "status": "Not tested",
+        "affected_assets": [],
+        "input_kind": kind,
+        "input_path": path,
+        "description": ("The %s file supplied as --%s does not exist: %s. No %s state was read for any "
+                        "host, so every host is UNASSESSED for %s." % (label, kind, path, kind, kind)),
+        "observed_result": "Input file absent: %s" % path,
+        "impact": ("The register carries no %s findings for any host. That is a missing input, not a "
+                   "clean result, and the draft must not be presented as complete." % kind),
+        "remediation": "Run the %s assessment and supply the file it writes, or remove the argument deliberately." % kind,
+        "limitations": "The path was given explicitly; nothing was read from it.",
+        "method": "Command-line input check.",
+        "validation": "Not determined.",
+    }
+
+
+# ------------------------------------------------------------ patch findings
 def _coverage_gap(patch):
     """Record that patch state could not be determined.
 
@@ -304,6 +570,7 @@ def _coverage_gap(patch):
         "severity": "Not assessed",
         "status": "Not tested",
         "affected_assets": [patch.get("asset_id") or patch.get("computer_name")],
+        "asset_id": patch.get("asset_id") or patch.get("computer_name"),
         "description": (
             "The host reports %s at servicing level %s. No vendor product matched "
             "that identity, so no determination of outstanding security updates was "
@@ -323,18 +590,123 @@ def _coverage_gap(patch):
     }
 
 
-def _patch_finding(patch, index):
+def _feed_date(patch):
+    text = patch.get("feed_fetched_utc")
+    if not text:
+        return None
+    return str(text)[:10]
+
+
+def _kev_evaluated(patch, updates):
+    """False when the catalogue was unavailable (kev_available false) or any row
+    carries a null known_exploited; the overlay was then not applied."""
+    if patch.get("kev_available") is False:
+        return False
+    return not any(u.get("known_exploited") is None for u in updates)
+
+
+def _window_limitations(patch):
+    """The truncated-window limitation PatchCheck writes when findings were still
+    being found in the oldest release evaluated (the count is a floor)."""
+    out = []
+    for text in patch.get("limitations") or []:
+        lowered = str(text).lower()
+        if "window too narrow" in lowered or "floor" in lowered:
+            out.append(str(text))
+    return out
+
+
+def _patch_finding(patch, index, host_position=None):
+    """One finding per host for its outstanding operating-system updates.
+
+    host_position is the host's index in MissingUpdates.json's hosts[] list
+    (defaults to index - 1); the evidence pointer names it so each finding is
+    traceable to its own block, not to the top-level mirror of the first host.
+    """
     updates = patch.get("missing_updates") or []
     if not updates:
         return None
+    if host_position is None:
+        host_position = index - 1
 
     scored = [u for u in updates if u.get("cvss_base_score") is not None]
     worst = max(scored, key=lambda u: u["cvss_base_score"]) if scored else None
     counts = patch.get("counts", {})
-    kev = [u for u in updates if u.get("known_exploited")]
+    feed_date = _feed_date(patch)
+    kev_evaluated = _kev_evaluated(patch, updates)
+    kev = [u for u in updates if u.get("known_exploited") is True]
 
-    # Distinct KBs are what actually gets installed.
-    kbs = sorted({u.get("kb") for u in updates if u.get("kb")})
+    # The remediation target is the highest fixed build on the host's servicing
+    # branch across every outstanding row, compared numerically. The worst-scoring
+    # CVE's own fixed build is often older and would understate the target.
+    host_build = _build_tuple(patch.get("observed_build") or patch.get("full_build"))
+    fixed = []
+    for u in updates:
+        build = _build_tuple(u.get("fixed_build"))
+        if build is None or len(build) < 2:
+            continue
+        if host_build and len(host_build) >= 2 and build[-2] != host_build[-2]:
+            continue
+        fixed.append((build, u))
+    fixed.sort(key=lambda item: item[0], reverse=True)
+    if fixed:
+        max_build = ".".join(str(n) for n in fixed[0][0])
+        remediation = (
+            "Apply the current cumulative update for this servicing branch. The latest fixed "
+            "build referenced by this result is %s (vendor data of %s); confirm the applicable "
+            "current update and supersedence with the vendor catalogue before issuing a target "
+            "build." % (max_build, feed_date or "an unrecorded date"))
+    else:
+        max_build = None
+        remediation = "ANALYST REQUIRED: remediation target not determined."
+    kb_references = []
+    for _build, u in fixed:
+        kb = u.get("kb")
+        if kb and ("KB" + str(kb)) not in kb_references:
+            kb_references.append("KB" + str(kb))
+        if len(kb_references) == 8:
+            break
+
+    if not kev_evaluated:
+        exploitability = (
+            "The CISA Known Exploited Vulnerabilities catalogue was unavailable or not evaluated "
+            "for this result, so exploitation-in-the-wild status is not determined for the "
+            "outstanding CVEs. That is not evidence they are not exploited.")
+    elif kev:
+        exploitability = (
+            "As of the catalogue snapshot of %s, %d of the outstanding CVEs appear in the CISA "
+            "Known Exploited Vulnerabilities catalogue: %s."
+            % (feed_date or "an unrecorded date", len(kev), ", ".join(u["cve"] for u in kev[:10])))
+    else:
+        exploitability = (
+            "As of the catalogue snapshot of %s, no outstanding CVE appears in the CISA Known "
+            "Exploited Vulnerabilities catalogue. That is not evidence they cannot be exploited."
+            % (feed_date or "an unrecorded date"))
+
+    window = _window_limitations(patch)
+    other_limitations = [str(l) for l in (patch.get("limitations") or []) if str(l) not in window]
+
+    evidence = [{
+        "evidence_file": "MissingUpdates.json",
+        "evidence_pointer": "hosts[%d]" % host_position,
+        "asset_id": patch.get("asset_id"),
+        "full_build": patch.get("full_build") or patch.get("observed_build"),
+        "feed_fetched_utc": patch.get("feed_fetched_utc"),
+        "source_batch": patch.get("source_batch"),
+        "generated_utc": patch.get("generated_utc"),
+    }]
+    if host_position == 0:
+        # The first host is also mirrored at the top level of MissingUpdates.json
+        # for older consumers; only that host may point there.
+        evidence.append({
+            "evidence_file": "MissingUpdates.json",
+            "evidence_pointer": "missing_updates",
+            "asset_id": patch.get("asset_id"),
+            "full_build": patch.get("full_build") or patch.get("observed_build"),
+            "feed_fetched_utc": patch.get("feed_fetched_utc"),
+            "source_batch": patch.get("source_batch"),
+            "generated_utc": patch.get("generated_utc"),
+        })
 
     return {
         "id": "VULN-%02d" % index,
@@ -351,50 +723,43 @@ def _patch_finding(patch, index):
         "affected_asset_count": 1,
         "description": (
             "The host is running %s at servicing level %s. Microsoft has published fixes "
-            "that require a later build, so %d security updates are outstanding."
+            "that require a later build on this servicing branch; %d CVEs are carried by the "
+            "outstanding cumulative-update stream."
             % (patch.get("os_caption"), patch.get("observed_build"), len(updates))),
         "observed_result": (
-            "Servicing level %s. Outstanding updates: %d (%d rated 9.0 or above, %d rated "
-            "7.0 to 8.9). Distinct update packages required: %d."
+            "Servicing level %s. Outstanding CVEs: %d (%d rated 9.0 or above, %d rated "
+            "7.0 to 8.9). Latest fixed build referenced: %s."
             % (patch.get("observed_build"), len(updates),
-               counts.get("critical_9_plus", 0), counts.get("high_7_plus", 0), len(kbs))),
+               counts.get("critical_9_plus", 0), counts.get("high_7_plus", 0),
+               max_build or "not determined")),
         "technical_interpretation": (
             "Determined by comparing the host's recorded servicing level against the build "
             "in which each fix shipped. No vulnerability was validated by execution."),
         "preconditions": ANALYST,
-        "exploitability": (
-            "%d of the outstanding CVEs appear in the CISA Known Exploited Vulnerabilities "
-            "catalogue: %s." % (len(kev), ", ".join(u["cve"] for u in kev[:10]))
-            if kev else
-            "None of the outstanding CVEs currently appear in the CISA Known Exploited "
-            "Vulnerabilities catalogue. That is not evidence they cannot be exploited."),
+        "exploitability": exploitability,
+        "kev_evaluated": kev_evaluated,
         "attack_chain": ANALYST,
         "proof_of_concept": ("NOT APPLICABLE - determined from servicing level against vendor "
                              "data. No exploitation was attempted."),
         "impact": ANALYST,
-        "remediation": (
-            "Apply the outstanding cumulative update so the host reaches at least build %s. "
-            "Update packages required: %s."
-            % (worst["fixed_build"] if worst else ANALYST, ", ".join("KB" + k for k in kbs[:8]))),
-        "retest_guidance": "Re-collect the host evidence and confirm the servicing level has advanced past the required build.",
-        "evidence": [{
-            "evidence_file": "MissingUpdates.json",
-            "evidence_pointer": "missing_updates",
-            "asset_id": patch.get("asset_id"),
-            "source_batch": patch.get("source_batch"),
-            "generated_utc": patch.get("generated_utc"),
-        }],
+        "remediation": remediation,
+        "remediation_target_build": max_build,
+        "kb_references": {"label": KB_LABEL, "items": kb_references},
+        "retest_guidance": "Re-collect the host evidence and confirm the servicing level has advanced past the current cumulative update for this branch.",
+        "evidence": evidence,
         "cve_detail": [{
             "cve": u["cve"], "kb": u.get("kb"), "cvss_base_score": u.get("cvss_base_score"),
             "cvss_vector": u.get("cvss_vector"), "fixed_build": u.get("fixed_build"),
             "known_exploited": u.get("known_exploited"),
         } for u in updates],
-        "limitations": "; ".join(patch.get("limitations") or []),
+        "window_truncated": bool(window) or bool(patch.get("window_truncated")),
+        "limitations": "; ".join(window + other_limitations),
         "method": "Credentialed servicing-level assessment against vendor published data.",
         "validation": "Not validated by execution.",
     }
 
 
+# --------------------------------------------------------- software findings
 def _software_gap(software):
     return {
         "id": "GAP-SW-01",
@@ -403,6 +768,7 @@ def _software_gap(software):
         "severity": "Not assessed",
         "status": "Not tested",
         "affected_assets": [software.get("asset_id") or software.get("computer_name")],
+        "asset_id": software.get("asset_id") or software.get("computer_name"),
         "description": ("The installed-software inventory was not present or not collected, so "
                         "end-of-life and outdated third-party software could not be assessed."),
         "observed_result": "No determination made.",
@@ -460,7 +826,7 @@ def _software_finding(software, index):
         "retest_guidance": "Re-collect the host evidence and confirm each listed product is supported and current.",
         "evidence": [{
             "evidence_file": "SoftwareRisk.json",
-            "evidence_pointer": "items",
+            "evidence_pointer": "hosts[%d]" % (index - 1),
             "asset_id": asset,
             "source_batch": software.get("source_batch"),
             "generated_utc": software.get("generated_utc"),
@@ -475,15 +841,80 @@ def _software_finding(software, index):
     }
 
 
+# ------------------------------------------------------------- dispositions
+def _read_dispositions(path, known_ids):
+    """Analyst dispositions keyed by test_id, validated the way Analyze.merge_manual
+    validates Manual.csv: exact columns, no duplicate test_id, every test_id must
+    exist in Tests.csv, the disposition must be one of DISPOSITIONS, and an
+    evidence file (when named) must exist next to the CSV and match its SHA-256.
+    Any violation stops the run; a register must never carry a disposition that
+    points at nothing."""
+    if not os.path.isfile(path):
+        raise SystemExit("Dispositions file not found: %s" % path)
+    base = os.path.dirname(os.path.abspath(path))
+    records = {}
+    with open(path, encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != DISPOSITION_FIELDS:
+            raise SystemExit("Dispositions CSV columns do not match Templates/ReviewDispositions.csv exactly. "
+                             "Expected: %s" % ",".join(DISPOSITION_FIELDS))
+        for row in reader:
+            test_id = (row.get("test_id") or "").strip()
+            if not test_id:
+                continue
+            if test_id in records:
+                raise SystemExit("Duplicate disposition for test_id %s." % test_id)
+            if test_id not in known_ids:
+                raise SystemExit("Disposition references unknown test_id: %s." % test_id)
+            disposition = (row.get("disposition") or "").strip()
+            if disposition not in DISPOSITIONS:
+                raise SystemExit("Invalid disposition %r for %s. Allowed: %s."
+                                 % (disposition, test_id, ", ".join(DISPOSITIONS)))
+            evidence = (row.get("evidence_file") or "").strip()
+            claimed = (row.get("evidence_sha256") or "").strip().lower()
+            actual = ""
+            if evidence:
+                parts = evidence.replace("\\", "/").split("/")
+                if os.path.isabs(evidence) or ".." in parts:
+                    raise SystemExit("Disposition evidence path for %s must be relative to the CSV directory." % test_id)
+                full = os.path.join(base, *parts)
+                if not os.path.isfile(full):
+                    raise SystemExit("Disposition evidence file for %s is missing: %s" % (test_id, evidence))
+                actual = _sha256(full)
+                if not re.fullmatch(r"[0-9a-f]{64}", claimed) or actual != claimed:
+                    raise SystemExit("Disposition evidence SHA-256 mismatch for %s." % test_id)
+            elif claimed:
+                raise SystemExit("Disposition evidence_sha256 provided without evidence_file for %s." % test_id)
+            records[test_id] = {
+                "disposition": disposition,
+                "rationale": (row.get("rationale") or "").strip(),
+                "reviewer": (row.get("reviewer") or "").strip(),
+                "timestamp_utc": (row.get("timestamp_utc") or "").strip(),
+                "evidence_file": evidence,
+                "evidence_sha256": actual,
+            }
+    return records
+
+
+def _apply_dispositions(review_queue, records):
+    for entry in review_queue:
+        record = records.get(entry.get("test_id"))
+        entry["disposition"] = dict(record) if record else dict(PENDING)
+    return review_queue
+
+
+# ----------------------------------------------------------------------- main
 def main():
     parser = argparse.ArgumentParser(
         description="Draft a findings register from collected evidence.")
     parser.add_argument("--derived", required=True,
-                        help="directory holding Tests.csv from Analyze.py")
+                        help="directory holding Tests.csv (and Coverage.csv) from Analyze.py")
     parser.add_argument("--patch", default=None,
-                        help="MissingUpdates.json from PatchCheck.py (optional)")
+                        help="MissingUpdates.json from PatchCheck.py (optional; if given it must exist)")
     parser.add_argument("--software", default=None,
-                        help="SoftwareRisk.json from SoftwareCheck.py (optional)")
+                        help="SoftwareRisk.json from SoftwareCheck.py (optional; if given it must exist)")
+    parser.add_argument("--dispositions", default=None,
+                        help="completed Templates/ReviewDispositions.csv (optional)")
     parser.add_argument("--output", required=True, help="output directory")
     parser.add_argument("--engagement-id", default="LAB-001")
     arguments = parser.parse_args()
@@ -493,51 +924,94 @@ def main():
         raise SystemExit("No Tests.csv in %s. Run Analyze.py first." % arguments.derived)
     with open(tests_path, encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
+    known_ids = {row.get("test_id") for row in rows if row.get("test_id")}
+
+    dispositions = {}
+    if arguments.dispositions:
+        dispositions = _read_dispositions(arguments.dispositions, known_ids)
 
     findings = _config_findings(rows)
 
     coverage_gaps = []
-    # Both engines now assess every host in the batch and list them under "hosts";
-    # older outputs carry one host at the top level. Every host is read: an
-    # undetermined or rejected host becomes a coverage gap, never silence.
-    if arguments.patch and os.path.isfile(arguments.patch):
-        patch = _read_json(arguments.patch)
-        patch_hosts = patch.get("hosts") or [patch]
-        inserted = 0
-        for host_index, host_block in enumerate(patch_hosts, 1):
-            if host_block.get("status") in ("Unknown", "EvidenceRejected"):
-                gap = _coverage_gap(host_block)
-                gap["id"] = "GAP-PT-%02d" % host_index
-                if host_block.get("status") == "EvidenceRejected":
-                    gap["title"] = "Patch state not assessed: host evidence rejected"
-                    gap["limitations"] = str(host_block.get("rejection_reason") or gap.get("limitations"))
-                coverage_gaps.append(gap)
-            else:
-                entry = _patch_finding(host_block, host_index)
-                if entry:
-                    findings.insert(inserted, entry)
-                    inserted += 1
+    required_input_failures = []
+    # Both engines assess every scoped host and list them under "hosts"; older
+    # outputs carry one host at the top level. Every host is read: an undetermined,
+    # unattempted or rejected host becomes a coverage gap, never silence.
+    if arguments.patch:
+        if not os.path.isfile(arguments.patch):
+            required_input_failures.append(("patch", arguments.patch))
+        else:
+            patch = _read_json(arguments.patch)
+            patch_hosts = patch.get("hosts") or [patch]
+            inserted = 0
+            for host_index, host_block in enumerate(patch_hosts, 1):
+                # Feed date and KEV availability are recorded once at the top level.
+                for key in ("feed_fetched_utc", "kev_available"):
+                    if key not in host_block and key in patch:
+                        host_block[key] = patch[key]
+                status = host_block.get("status")
+                if status == "Excluded":
+                    continue
+                if status in ("Unknown", "EvidenceRejected", "NotAttempted"):
+                    gap = _coverage_gap(host_block)
+                    gap["id"] = "GAP-PT-%02d" % host_index
+                    if status == "EvidenceRejected":
+                        gap["title"] = "Patch state not assessed: host evidence rejected"
+                        gap["limitations"] = str(host_block.get("rejection_reason") or gap.get("limitations"))
+                    elif status == "NotAttempted":
+                        gap["title"] = "Patch state not assessed: no verified host evidence for this scoped asset"
+                        gap["description"] = ("The asset is in the approved scope but produced no verified host "
+                                              "evidence (ledger status %s), so no determination of outstanding "
+                                              "security updates was made."
+                                              % (host_block.get("ledger_status") or "absent"))
+                        gap["limitations"] = str(host_block.get("rejection_reason") or gap.get("limitations"))
+                    coverage_gaps.append(gap)
+                else:
+                    entry = _patch_finding(host_block, host_index, host_position=host_index - 1)
+                    if entry:
+                        findings.insert(inserted, entry)
+                        inserted += 1
 
-    if arguments.software and os.path.isfile(arguments.software):
-        software = _read_json(arguments.software)
-        software_hosts = software.get("hosts") or [software]
-        for host_index, host_block in enumerate(software_hosts, 1):
-            if host_block.get("status") == "Unknown":
-                gap = _software_gap(host_block)
-                gap["id"] = "GAP-SW-%02d" % host_index
-                coverage_gaps.append(gap)
-            else:
-                sw_entry = _software_finding(host_block, host_index)
-                if sw_entry:
-                    findings.append(sw_entry)
+    if arguments.software:
+        if not os.path.isfile(arguments.software):
+            required_input_failures.append(("software", arguments.software))
+        else:
+            software = _read_json(arguments.software)
+            software_hosts = software.get("hosts") or [software]
+            for host_index, host_block in enumerate(software_hosts, 1):
+                status = host_block.get("status")
+                if status == "Excluded":
+                    continue
+                if status in ("Unknown", "EvidenceRejected", "NotAttempted"):
+                    gap = _software_gap(host_block)
+                    gap["id"] = "GAP-SW-%02d" % host_index
+                    if status == "EvidenceRejected":
+                        gap["title"] = "Third-party software not assessed: host evidence rejected"
+                        gap["limitations"] = str(host_block.get("rejection_reason") or gap.get("limitations"))
+                    elif status == "NotAttempted":
+                        gap["title"] = "Third-party software not assessed: no verified host evidence for this scoped asset"
+                        gap["limitations"] = str(host_block.get("rejection_reason") or gap.get("limitations"))
+                    coverage_gaps.append(gap)
+                else:
+                    sw_entry = _software_finding(host_block, host_index)
+                    if sw_entry:
+                        findings.append(sw_entry)
 
-    review_queue = _review_queue(rows)
+    for kind, path in required_input_failures:
+        coverage_gaps.append(_missing_input_gap(kind, path, len(coverage_gaps) + 1))
+
+    assets = _read_coverage(arguments.derived)
+    coverage_gaps.extend(_asset_coverage_gaps(assets, rows, len(coverage_gaps) + 1))
+    coverage_gaps.extend(_scan_gaps(rows, len(coverage_gaps) + 1))
+
+    review_queue = _apply_dispositions(_review_queue(rows), dispositions)
     coverage_gaps.extend(_review_gaps(rows, len(coverage_gaps) + 1))
 
     needs_analyst = sum(
         1 for f in findings
         for value in f.values()
         if isinstance(value, str) and value == ANALYST)
+    pending = sum(1 for entry in review_queue if entry["disposition"].get("disposition") == "Pending")
 
     document = {
         "schema_version": "1.0",
@@ -556,6 +1030,11 @@ def main():
             "coverage_gaps": len(coverage_gaps),
             "review_queue": len(review_queue),
             "fields_awaiting_analyst": needs_analyst,
+            "dispositions_recorded": len(dispositions),
+            "pending": pending,
+            "scoped_assets": len(assets),
+            "scoped_assets_complete": sum(1 for a in assets if a.get("status") in COVERAGE_COMPLETE),
+            "required_input_failures": len(required_input_failures),
         },
         "findings": findings,
         "coverage_gaps": coverage_gaps,
@@ -577,9 +1056,18 @@ def main():
               % len(coverage_gaps))
     print("Review queue     : %d rows awaiting analyst disposition (Candidate, Unknown, Error, "
           "Not tested, Inconclusive, scanner observations)" % len(review_queue))
+    if dispositions:
+        print("Dispositions     : %d recorded, %d review rows still Pending" % (len(dispositions), pending))
     print("Fields awaiting analyst completion: %d" % needs_analyst)
     print("Written          : %s" % path)
-    return 0
+    print("Reminder         : seal the derived output after this step with "
+          "python Code/SealDerived.py \"%s\" so Manifest.txt covers findings.json and the review files."
+          % os.path.abspath(arguments.output))
+    if required_input_failures:
+        for kind, missing in required_input_failures:
+            print("REQUIRED INPUT MISSING: --%s %s does not exist; recorded as a coverage gap." % (kind, missing))
+        return EXIT_REQUIRED_INPUT
+    return EXIT_OK
 
 
 if __name__ == "__main__":

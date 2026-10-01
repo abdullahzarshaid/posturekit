@@ -401,7 +401,8 @@ class WirelessImportTests(unittest.TestCase):
                  {'host':'h2','port':'445/tcp','name':'Med vuln','threat':'Medium','actionable':True},
                  {'host':'h3','port':'general/tcp','name':'Info','threat':'Log','actionable':False}]}
         tests,_=a.import_greenbone(self._w(doc),'E')
-        self.assertEqual([t['result'] for t in tests],['Candidate','Candidate','Observation'])
+        self.assertEqual(tests[0]['test_id'],'VULN.SCAN')   # scan-level completeness row leads the list
+        self.assertEqual([t['result'] for t in tests if t['test_id']!='VULN.SCAN'],['Candidate','Candidate','Observation'])
     def test_greenbone_engagement_mismatch_raises(self):
         doc={'schema_version':'1.0','tool_version':a.VERSION,'evidence_kind':'GreenboneObservations','engagement_id':'X','observations':[]}
         with self.assertRaises(ValueError): a.import_greenbone(self._w(doc),'E')
@@ -763,6 +764,31 @@ def host_doc(asset, caption, full_build, release='21H2', arch='64-bit', install=
 SERVER_2022 = {'11923':'Windows Server 2022','12244':'Windows Server 2022, 23H2 Edition'}
 
 
+def sealed_batch(root, hosts, extra_targets=(), tamper=False, ledger=True, scope=True):
+    """Write a sealed raw batch (Scope.json + Batch.json) holding the given host
+    documents. extra_targets = [(asset_id, enabled, ledger_status_or_None)] adds
+    scoped targets without a Host file: a ledger_status of None means no ledger
+    entry at all. tamper breaks the first host's recorded digest; ledger=False
+    omits Batch.json; scope=False omits Scope.json."""
+    root=Path(root)
+    targets=[{'asset_id':h['asset_id'],'site_id':'LAB','computer_name':h['asset_id'],'enabled':True} for h in hosts]
+    targets+=[{'asset_id':t,'site_id':'LAB','computer_name':t,'enabled':en} for t,en,_ in extra_targets]
+    scope_doc={'schema_version':'1.0','engagement_id':'SYNTHETIC','approved_for_lab':True,'targets':targets}
+    if scope: (root/'Scope.json').write_text(json.dumps(scope_doc),encoding='utf-8')
+    entries=[]
+    for h in hosts:
+        name='Host.%s.json'%h['asset_id']; (root/name).write_text(json.dumps(h),encoding='utf-8')
+        entries.append({'asset_id':h['asset_id'],'site_id':'LAB','computer_name':h['asset_id'],'status':'Complete','evidence_file':name,'evidence_sha256':a.sha256(root/name)})
+    for t,en,status in extra_targets:
+        if status is not None and en:
+            entries.append({'asset_id':t,'site_id':'LAB','computer_name':t,'status':status,'error':'SYNTHETIC: WinRM timeout' if status in ('NotAttempted','Error') else None})
+    if tamper: entries[0]['evidence_sha256']='1'*64
+    batch={'schema_version':'1.0','tool_version':'0.6','evidence_kind':'CollectionBatch','batch_id':'B1','engagement_id':'SYNTHETIC',
+           'scope_sha256':a.sha256(root/'Scope.json') if scope else '0'*64,'collector_sha256':'0'*64,'completed_utc':'2026-10-01T00:00:02+00:00','targets':entries}
+    if ledger: (root/'Batch.json').write_text(json.dumps(batch),encoding='utf-8')
+    return root
+
+
 class Build20261001PatchCheckTests(unittest.TestCase):
     """Defects 1 to 10 of the 1 October 2026 review of PatchCheck.py."""
     H2022 = host_doc('A','Microsoft Windows Server 2022 Standard','10.0.20348.1000')
@@ -900,13 +926,7 @@ class Build20261001PatchCheckTests(unittest.TestCase):
 
     # 10. integrity gate + 1. every host (end to end, offline, seeded cache)
     def _batch(self, td, hosts, tamper=None, ledger=True):
-        root=Path(td); targets=[]
-        for h in hosts:
-            name='Host.%s.json'%h['asset_id']; (root/name).write_text(json.dumps(h),encoding='utf-8')
-            targets.append({'asset_id':h['asset_id'],'computer_name':h['asset_id'],'status':'Complete','evidence_file':name,'evidence_sha256':a.sha256(root/name)})
-        if tamper: targets[0]['evidence_sha256']='1'*64
-        if ledger: (root/'Batch.json').write_text(json.dumps({'targets':targets}),encoding='utf-8')
-        return root
+        return sealed_batch(td, hosts, tamper=bool(tamper), ledger=ledger)
     def _seed(self, td, doc):
         cache=Path(td)/'cache'; cache.mkdir()
         (cache/'msrc_index.json').write_text(json.dumps({'value':[{'ID':'2026-Sep'}]}),encoding='utf-8')
@@ -982,9 +1002,7 @@ class Build20261001SoftwareCheckTests(unittest.TestCase):
         self.assertEqual(got,{'Lenovo ThinkBook Utility':'KevProductPresent'})
     def test_two_hosts_catalog_warning_and_unknown_top_level(self):
         with tempfile.TemporaryDirectory() as td:
-            root=Path(td)
-            (root/'Host.A.json').write_text(json.dumps(self.doc('A','Error')),encoding='utf-8')
-            (root/'Host.B.json').write_text(json.dumps(self.doc('B','Collected',[{'Name':'WinRAR 6.11 (64-bit)','Version':'6.11.0'}])),encoding='utf-8')
+            root=sealed_batch(td,[self.doc('A','Error'),self.doc('B','Collected',[{'Name':'WinRAR 6.11 (64-bit)','Version':'6.11.0'}])])
             out=root/'out'
             c=subprocess.run([sys.executable,str(HERE.parent/'Extensions'/'SoftwareCheck.py'),'--batch',str(root),'--output',str(out),'--no-kev'],capture_output=True,text=True)
             self.assertNotIn('Traceback',c.stderr); self.assertEqual(c.returncode,1)
@@ -992,6 +1010,416 @@ class Build20261001SoftwareCheckTests(unittest.TestCase):
             self.assertEqual([(h['asset_id'],h['status']) for h in d['hosts']],[('A','Unknown'),('B','RiskySoftware')])
             self.assertEqual(d['status'],'Unknown'); self.assertEqual(d['asset_id'],'A')
             self.assertIn('curated snapshot',d['catalog_warning']); self.assertEqual(d['hosts'][1]['items'][0]['risk_type'],'BelowVersionFloor')
+
+
+# ---------------------------------------------------------------------------
+# Build 2026-10-01 RC2: shared input/coverage contract (C1), patch finding
+# semantics (C3), importer completeness (C4), analyst dispositions and sealing
+# (C5). Synthetic fixtures only; PatchCheck runs offline against a seeded cache.
+# ---------------------------------------------------------------------------
+_eg_spec=importlib.util.spec_from_file_location('evidencegate',HERE/'EvidenceGate.py')
+eg=importlib.util.module_from_spec(_eg_spec); _eg_spec.loader.exec_module(eg)
+_sd_spec=importlib.util.spec_from_file_location('sealderived',HERE/'SealDerived.py')
+sd=importlib.util.module_from_spec(_sd_spec); _sd_spec.loader.exec_module(sd)
+
+
+class Build20261001RC2Tests(unittest.TestCase):
+    def setUp(self): self.tmp=tempfile.TemporaryDirectory(); self.root=Path(self.tmp.name)
+    def tearDown(self): self.tmp.cleanup()
+    def _dir(self,name):
+        d=self.root/name; d.mkdir(); return d
+    def _json(self,name,obj):
+        p=self.root/name; p.write_text(json.dumps(obj),encoding='utf-8'); return p
+    def _run(self,script,*argv):
+        return subprocess.run([sys.executable,str(HERE.parent/script)]+[str(x) for x in argv],capture_output=True,text=True)
+    def _raw(self,asset,error_source=None):
+        return {'schema_version':'1.0','tool_version':'0.6','evidence_kind':'WindowsCollection','asset_id':asset,'site_id':'LAB','engagement_id':'SYNTHETIC',
+                'scope_sha256':'','collector_sha256':'0'*64,'collection_status':'Complete',
+                'started_utc':'2026-10-01T00:00:00Z','completed_utc':'2026-10-01T00:00:01Z',
+                'host':{'computer_name':asset,'domain_role':2,'is_domain_controller':False},
+                'sources':[source(i,status=('Error' if i==error_source else 'Collected')) for i in sorted(a.SOURCE_IDS)]}
+    def _analyze_batch(self,name,targets,evidence_for=(),error_source=None):
+        """A sealed batch for Analyze: targets=[(asset, enabled, ledger_status)], Host files for evidence_for."""
+        d=self._dir(name)
+        scope={'schema_version':'1.0','engagement_id':'SYNTHETIC','approved_for_lab':True,
+               'targets':[{'asset_id':t,'site_id':'LAB','computer_name':t,'enabled':en} for t,en,_ in targets]}
+        (d/'Scope.json').write_text(json.dumps(scope),encoding='utf-8')
+        batch={'schema_version':'1.0','tool_version':'0.6','evidence_kind':'CollectionBatch','batch_id':'B1','engagement_id':'SYNTHETIC',
+               'scope_sha256':a.sha256(d/'Scope.json'),'collector_sha256':'0'*64,'completed_utc':'2026-10-01T00:00:02+00:00','targets':[]}
+        for t,en,status in targets:
+            if t in evidence_for:
+                raw=self._raw(t,error_source if t==evidence_for[-1] else None); raw['scope_sha256']=batch['scope_sha256']
+                (d/f'Host.{t}.json').write_text(json.dumps(raw),encoding='utf-8')
+                batch['targets'].append({'asset_id':t,'site_id':'LAB','computer_name':t,'status':'Complete','evidence_file':f'Host.{t}.json','evidence_sha256':a.sha256(d/f'Host.{t}.json')})
+            elif status is not None:
+                batch['targets'].append({'asset_id':t,'site_id':'LAB','computer_name':t,'status':status,'error':'SYNTHETIC: WinRM timeout'})
+        (d/'Batch.json').write_text(json.dumps(batch),encoding='utf-8')
+        return d
+    def _derived(self,batch_dir,rules=None,extra=()):
+        rules=rules or {'schema_version':'1.0','profile_id':'SYN','rules':[base_rule()]}
+        rr=self._json('rules.json',rules); out=self.root/('derived_'+batch_dir.name)
+        c=self._run('Code/Analyze.py','--batch',batch_dir,'--rules',rr,'--output',out,*extra)
+        self.assertTrue((out/'Coverage.csv').exists(),c.stderr); return out
+    def _tests_csv(self,name,rows):
+        d=self._dir(name)
+        fields=['test_id','phase','category','site_id','asset_id','source_position','objective','method','control_refs','expected','observed','result',
+                'technical_interpretation','severity','validation','evidence_file','evidence_pointer','evidence_sha256','timestamp_utc','limitations','reference','manual_validation']
+        with (d/'Tests.csv').open('w',encoding='utf-8-sig',newline='') as f:
+            w=csv.DictWriter(f,fieldnames=fields,extrasaction='ignore'); w.writeheader()
+            for r in rows: w.writerow({k:r.get(k,'') for k in fields})
+        return d
+    def _seed(self,doc):
+        cache=self._dir('cache')
+        (cache/'msrc_index.json').write_text(json.dumps({'value':[{'ID':'2026-Sep'}]}),encoding='utf-8')
+        (cache/'msrc_2026-Sep.json').write_text(json.dumps(doc),encoding='utf-8')
+        (cache/'cisa_kev.json').write_text(json.dumps({'vulnerabilities':[{'cveID':'CVE-1'}]}),encoding='utf-8')
+        return cache
+    def _patch_block(self,**over):
+        block={'asset_id':'A','computer_name':'A','os_caption':'SYNTHETIC Windows','observed_build':'10.0.20348.1','full_build':'10.0.20348.1',
+               'counts':{'critical_9_plus':1,'high_7_plus':0},'kev_available':True,'feed_fetched_utc':'2026-09-30T06:00:00+00:00','limitations':[],
+               'missing_updates':[{'cve':'CVE-2099-0001','kb':'1','fixed_build':'10.0.20348.2','cvss_base_score':9.8,'cvss_vector':'V','known_exploited':False},
+                                  {'cve':'CVE-2099-0002','kb':'2','fixed_build':'10.0.20348.3','cvss_base_score':5.5,'cvss_vector':'V','known_exploited':False},
+                                  {'cve':'CVE-2099-0003','kb':'3','fixed_build':'10.0.26100.9','cvss_base_score':7.5,'cvss_vector':'V','known_exploited':False}]}
+        block.update(over); return block
+
+    # -- 1. EvidenceGate.verify_batch is the shared contract --
+    def test_gate_accounts_for_every_scoped_target(self):
+        d=self._analyze_batch('b',[('A',True,None),('B',True,'NotAttempted'),('C',False,None),('D',True,None)],evidence_for=('A',))
+        g=eg.verify_batch(d)
+        self.assertEqual((g['engagement_id'],g['batch_id']),('SYNTHETIC','B1')); self.assertEqual(len(g['scope_sha256']),64)
+        self.assertEqual([t['asset_id'] for t in g['targets']],['A','B','C','D']); self.assertEqual(set(g['ledger']),{'A','B'})
+        by={h['asset_id']:h for h in g['hosts']}
+        self.assertEqual((by['A']['status'],by['A']['digest_ok'],by['A']['evidence_file']),('Complete',True,'Host.A.json'))
+        self.assertEqual((by['B']['status'],by['B']['digest_ok']),('NotAttempted',None)); self.assertIn('WinRM timeout',by['B']['reason'])
+        self.assertEqual(by['C']['status'],'Excluded'); self.assertIn('approved scope',by['C']['reason'])
+        self.assertEqual(by['D']['status'],'NotAttempted'); self.assertIn('No ledger entry',by['D']['reason'])
+    def test_gate_digest_mismatch_is_rejected(self):
+        d=self._analyze_batch('b',[('A',True,None)],evidence_for=('A',))
+        ledger=json.loads((d/'Batch.json').read_text()); ledger['targets'][0]['evidence_sha256']='1'*64; (d/'Batch.json').write_text(json.dumps(ledger),encoding='utf-8')
+        h=eg.verify_batch(d)['hosts'][0]
+        self.assertEqual((h['status'],h['digest_ok']),('EvidenceRejected',False)); self.assertIn('digest mismatch',h['reason'])
+    def test_gate_missing_batch_or_scope_raises(self):
+        d=self._analyze_batch('b',[('A',True,None)],evidence_for=('A',))
+        (d/'Batch.json').unlink()
+        with self.assertRaises(ValueError) as cm: eg.verify_batch(d)
+        self.assertIn('Batch.json is absent',str(cm.exception))
+        d2=self._analyze_batch('b2',[('A',True,None)],evidence_for=('A',)); (d2/'Scope.json').unlink()
+        with self.assertRaises(ValueError) as cm: eg.verify_batch(d2)
+        self.assertIn('Scope.json is absent',str(cm.exception))
+        with self.assertRaises(ValueError): eg.verify_batch(self.root/'nope')
+    def test_gate_rejects_the_same_ledger_faults_as_analyze(self):
+        d=self._analyze_batch('b',[('A',True,None)],evidence_for=('A',))
+        ledger=json.loads((d/'Batch.json').read_text()); ledger['targets'][0]['site_id']='OTHER'; (d/'Batch.json').write_text(json.dumps(ledger),encoding='utf-8')
+        with self.assertRaises(ValueError) as cm: eg.verify_batch(d)
+        self.assertIn('identity mismatch',str(cm.exception))
+        with self.assertRaises(ValueError): a.analyze_batch(d,{'schema_version':'1.0','profile_id':'SYN','rules':[base_rule()]})
+    def test_analyze_patchcheck_softwarecheck_share_the_gate(self):
+        # Each module imports EvidenceGate by path and routes its ledger handling through verify_batch.
+        for module in (a,pc,sc):
+            self.assertTrue(callable(module.EvidenceGate.verify_batch),module.__name__)
+        d=self._analyze_batch('b',[('A',True,None),('B',True,'NotAttempted')],evidence_for=('A',))
+        assets,_,meta,_=a.analyze_batch(d,{'schema_version':'1.0','profile_id':'SYN','rules':[base_rule()]})
+        self.assertEqual([(x['asset_id'],x['status']) for x in assets],[('A','Complete'),('B','NotAttempted')])
+        self.assertEqual(meta['enabled_assets'],2)
+        original=a.EvidenceGate.verify_batch
+        a.EvidenceGate.verify_batch=lambda batch_dir: (_ for _ in ()).throw(ValueError('gate stub'))
+        try:
+            with self.assertRaises(ValueError) as cm: a.analyze_batch(d,{'schema_version':'1.0','profile_id':'SYN','rules':[base_rule()]})
+        finally: a.EvidenceGate.verify_batch=original
+        self.assertEqual(str(cm.exception),'gate stub')
+        statuses={h['asset_id']:h['status'] for h in pc.gate_hosts(str(d))}
+        self.assertEqual(statuses,{'A':'Accepted','B':'NotAttempted'})
+        self.assertEqual({h['asset_id']:h['status'] for h in sc.gate_hosts(str(d))},{'A':'Accepted','B':'NotAttempted'})
+
+    # -- 2. PatchCheck and SoftwareCheck account for every enabled target --
+    def test_patchcheck_writes_unattempted_and_excluded_targets(self):
+        root=sealed_batch(self._dir('b'),[host_doc('A','Microsoft Windows Server 2022 Standard','10.0.20348.1000')],
+                          extra_targets=[('B',True,'NotAttempted'),('C',False,None),('D',True,'Error')])
+        cache=self._seed(msrc_doc(SERVER_2022,[vuln('CVE-1',[('11923','10.0.20348.2000')])]))
+        out=self.root/'out'
+        c=self._run('Extensions/PatchCheck.py','--batch',root,'--output',out,'--cache',cache,'--offline')
+        self.assertNotIn('Traceback',c.stderr); self.assertEqual(c.returncode,1)
+        d=json.loads((out/'MissingUpdates.json').read_text(encoding='utf-8'))
+        self.assertEqual([(h['asset_id'],h['status']) for h in d['hosts']],[('A','MissingUpdates'),('B','NotAttempted'),('C','Excluded'),('D','NotAttempted')])
+        self.assertIn('WinRM timeout',d['hosts'][1]['rejection_reason']); self.assertEqual(d['hosts'][3]['ledger_status'],'Error')
+        self.assertTrue(any('NOT evidence that the host is patched' in l for l in d['hosts'][1]['limitations']))
+        self.assertEqual(d['hosts'][1]['missing_updates'],[]); self.assertIn('Host              : B',c.stdout)
+    def test_patchcheck_unattempted_only_exits_2(self):
+        root=sealed_batch(self._dir('b'),[],extra_targets=[('B',True,'NotAttempted')])
+        cache=self._seed(msrc_doc(SERVER_2022,[])); out=self.root/'out'
+        c=self._run('Extensions/PatchCheck.py','--batch',root,'--output',out,'--cache',cache,'--offline')
+        self.assertEqual(c.returncode,2,c.stderr); d=json.loads((out/'MissingUpdates.json').read_text(encoding='utf-8'))
+        self.assertEqual([(h['asset_id'],h['status']) for h in d['hosts']],[('B','NotAttempted')]); self.assertEqual(d['status'],'NotAttempted')
+    def test_patchcheck_refuses_folder_without_scope_and_digest_mismatch_stays_rejected(self):
+        root=sealed_batch(self._dir('b'),[host_doc('A','Microsoft Windows Server 2022 Standard','10.0.20348.1000')],scope=False)
+        cache=self._seed(msrc_doc(SERVER_2022,[]))
+        c=self._run('Extensions/PatchCheck.py','--batch',root,'--output',self.root/'out','--cache',cache,'--offline')
+        self.assertNotEqual(c.returncode,0); self.assertIn('Scope.json is absent',c.stderr); self.assertFalse((self.root/'out'/'MissingUpdates.json').exists())
+        root2=sealed_batch(self._dir('b2'),[host_doc('A','Microsoft Windows Server 2022 Standard','10.0.20348.1000')],tamper=True)
+        c=self._run('Extensions/PatchCheck.py','--batch',root2,'--output',self.root/'out2','--cache',cache,'--offline')
+        self.assertEqual(c.returncode,2); d=json.loads((self.root/'out2'/'MissingUpdates.json').read_text(encoding='utf-8'))
+        self.assertEqual(d['hosts'][0]['status'],'EvidenceRejected'); self.assertIn('digest mismatch',d['hosts'][0]['rejection_reason'])
+    def test_unsealed_host_file_is_rejected_not_hidden_as_unattempted(self):
+        root=sealed_batch(self._dir('b'),[host_doc('A','Microsoft Windows Server 2022 Standard','10.0.20348.1000')],extra_targets=[('B',True,'NotAttempted')])
+        (root/'Host.B.json').write_text(json.dumps(host_doc('B','Microsoft Windows Server 2022 Standard','10.0.20348.1000')),encoding='utf-8')
+        (root/'Host.Z.json').write_text(json.dumps(host_doc('Z','Microsoft Windows Server 2022 Standard','10.0.20348.1000')),encoding='utf-8')
+        by={h['asset_id']:h for h in pc.gate_hosts(str(root))}
+        self.assertEqual(by['B']['status'],'EvidenceRejected'); self.assertIn('no ledger entry',by['B']['reason']); self.assertIn('not sealed',by['B']['reason'])
+        self.assertEqual(by['Z']['status'],'EvidenceRejected'); self.assertIn('not in the approved scope',by['Z']['reason'])
+        self.assertEqual({h['asset_id']:h['status'] for h in sc.gate_hosts(str(root))}['B'],'EvidenceRejected')
+    def test_softwarecheck_refuses_unsealed_folder_and_accounts_for_targets(self):
+        unsealed=self._dir('raw'); (unsealed/'Host.A.json').write_text(json.dumps({'asset_id':'A','host':{'computer_name':'A'},'sources':[{'id':'software','status':'Collected','data':[]}]}),encoding='utf-8')
+        c=self._run('Extensions/SoftwareCheck.py','--batch',unsealed,'--output',self.root/'sw','--no-kev')
+        self.assertNotEqual(c.returncode,0); self.assertIn('Batch.json is absent',c.stderr); self.assertFalse((self.root/'sw'/'SoftwareRisk.json').exists())
+        root=sealed_batch(self._dir('b'),[{'asset_id':'A','host':{'computer_name':'A'},'sources':[{'id':'software','status':'Collected','data':[]}]}],
+                          extra_targets=[('B',True,'NotAttempted'),('C',False,None)])
+        c=self._run('Extensions/SoftwareCheck.py','--batch',root,'--output',self.root/'sw2','--no-kev')
+        self.assertEqual(c.returncode,2,c.stderr); d=json.loads((self.root/'sw2'/'SoftwareRisk.json').read_text(encoding='utf-8'))
+        self.assertEqual([(h['asset_id'],h['status']) for h in d['hosts']],[('A','NoRiskySoftwareFound'),('B','NotAttempted'),('C','Excluded')])
+        self.assertIn('WinRM timeout',d['hosts'][1]['rejection_reason']); self.assertTrue(any('NOT evidence' in l for l in d['hosts'][1]['limitations']))
+        root3=sealed_batch(self._dir('b3'),[{'asset_id':'A','host':{'computer_name':'A'},'sources':[{'id':'software','status':'Collected','data':[]}]}],tamper=True)
+        c=self._run('Extensions/SoftwareCheck.py','--batch',root3,'--output',self.root/'sw3','--no-kev')
+        self.assertEqual(c.returncode,2); self.assertEqual(json.loads((self.root/'sw3'/'SoftwareRisk.json').read_text(encoding='utf-8'))['hosts'][0]['status'],'EvidenceRejected')
+
+    # -- 3. ToFindings builds asset coverage gaps from Coverage.csv and Evidence.json --
+    def test_tofindings_coverage_gaps_for_every_non_complete_asset(self):
+        rules={'schema_version':'1.0','profile_id':'SYN','rules':[base_rule(),base_rule(id='T2',source='wdigest',field='UseLogonCredential',type='int',expected=0)]}
+        batch=self._analyze_batch('b',[('A',True,None),('B',True,'NotAttempted'),('C',False,None),('D',True,None)],evidence_for=('A','D'),error_source='wdigest')
+        derived=self._derived(batch,rules); out=self.root/'draft'
+        c=self._run('Extensions/ToFindings.py','--derived',derived,'--output',out,'--engagement-id','SYNTHETIC')
+        self.assertEqual(c.returncode,0,c.stderr); f=json.loads((out/'findings.json').read_text(encoding='utf-8'))
+        cv={g['asset_id']:g for g in f['coverage_gaps'] if g['id'].startswith('GAP-CV-')}
+        self.assertEqual(set(cv),{'B','C','D'})
+        self.assertEqual(cv['B']['coverage_status'],'NotAttempted'); self.assertEqual(cv['B']['affected_assets'],['B']); self.assertIn('WinRM timeout',cv['B']['description'])
+        self.assertEqual(cv['C']['coverage_status'],'Excluded'); self.assertIn('excluded',cv['C']['title'].lower())
+        self.assertEqual(cv['D']['coverage_status'],'Partial'); total=len(a.SOURCE_IDS)
+        self.assertEqual((cv['D']['sources_collected'],cv['D']['sources_total']),(total-1,total))
+        self.assertIn('%d of %d sources usable'%(total-1,total),cv['D']['description']); self.assertIn('wdigest',cv['D']['description'])
+        self.assertEqual(f['counts']['scoped_assets'],4); self.assertEqual(f['counts']['scoped_assets_complete'],1)
+        self.assertEqual(len({g['id'] for g in f['coverage_gaps']}),len(f['coverage_gaps']))
+    def test_tofindings_coverage_gap_reads_evidence_json_assets_too(self):
+        d=self._tests_csv('derived',[{'test_id':'HOST.A.SMB01','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'o','observed':'False','result':'Pass','evidence_file':'Host.A.json','evidence_sha256':'1'*64}])
+        (d/'Coverage.csv').write_text('asset_id,site_id,computer_name,status,evidence,note\nA,LAB,A,Complete,Host.A.json,ok\n',encoding='utf-8-sig')
+        (d/'Evidence.json').write_text(json.dumps({'coverage':[{'asset_id':'A','status':'Complete'},{'asset_id':'E','site_id':'LAB','computer_name':'E','status':'EvidenceRejected','note':'Evidence digest mismatch.'}]}),encoding='utf-8')
+        out=self.root/'draft'; c=self._run('Extensions/ToFindings.py','--derived',d,'--output',out,'--engagement-id','E')
+        self.assertEqual(c.returncode,0,c.stderr); f=json.loads((out/'findings.json').read_text(encoding='utf-8'))
+        gaps=[g for g in f['coverage_gaps'] if g.get('asset_id')=='E']
+        self.assertEqual(len(gaps),1); self.assertEqual(gaps[0]['coverage_status'],'EvidenceRejected'); self.assertIn('digest mismatch',gaps[0]['description'])
+
+    # -- 4. an explicitly supplied missing --patch / --software path is never ignored --
+    def test_tofindings_missing_explicit_inputs_recorded_and_exit_4(self):
+        batch=self._analyze_batch('b',[('A',True,None)],evidence_for=('A',)); derived=self._derived(batch); out=self.root/'draft'
+        c=self._run('Extensions/ToFindings.py','--derived',derived,'--patch',self.root/'missing.json','--software',self.root/'nope.json','--output',out,'--engagement-id','SYNTHETIC')
+        self.assertEqual(c.returncode,4,c.stderr); self.assertIn('REQUIRED INPUT MISSING',c.stdout)
+        f=json.loads((out/'findings.json').read_text(encoding='utf-8'))
+        gaps={g['input_kind']:g for g in f['coverage_gaps'] if g['id'].startswith('GAP-IN-')}
+        self.assertEqual(set(gaps),{'patch','software'})
+        self.assertIn('missing.json',gaps['patch']['description']); self.assertIn('patch',gaps['patch']['description'].lower())
+        self.assertIn('nope.json',gaps['software']['description']); self.assertEqual(f['counts']['required_input_failures'],2)
+        c=self._run('Extensions/ToFindings.py','--derived',derived,'--output',self.root/'draft2','--engagement-id','SYNTHETIC')
+        self.assertEqual(c.returncode,0,c.stderr)
+
+    # -- 5. remediation names the highest same-branch fixed build, never the worst CVE's --
+    def test_patch_remediation_targets_max_fixed_build_with_supersedence_caveat(self):
+        f=tf._patch_finding(self._patch_block(),1)
+        self.assertIn('10.0.20348.3',f['remediation']); self.assertIn('supersedence',f['remediation']); self.assertIn('vendor data of 2026-09-30',f['remediation'])
+        self.assertNotIn('at least build',f['remediation']); self.assertNotIn('10.0.20348.2',f['remediation']); self.assertNotIn('26100',f['remediation'])
+        self.assertEqual(f['remediation_target_build'],'10.0.20348.3'); self.assertEqual(f['severity'],'Critical')
+        self.assertNotIn('Update packages required',json.dumps(f))
+        self.assertEqual(f['kb_references']['label'],'KB references of the latest fixes in the evaluated window')
+        self.assertEqual(f['kb_references']['items'],['KB2','KB1'])
+    def test_patch_remediation_without_fixed_builds_is_analyst_required(self):
+        block=self._patch_block()
+        for u in block['missing_updates']: u['fixed_build']=None
+        f=tf._patch_finding(block,1)
+        self.assertEqual(f['remediation'],'ANALYST REQUIRED: remediation target not determined.'); self.assertIsNone(f['remediation_target_build'])
+        self.assertEqual(f['kb_references']['items'],[])
+    def test_patch_kb_references_capped_at_eight(self):
+        block=self._patch_block(); block['missing_updates']=[{'cve':'CVE-%d'%i,'kb':str(i),'fixed_build':'10.0.20348.%d'%i,'cvss_base_score':5.0,'cvss_vector':'V','known_exploited':False} for i in range(2,14)]
+        f=tf._patch_finding(block,1)
+        self.assertEqual(len(f['kb_references']['items']),8); self.assertEqual(f['kb_references']['items'][0],'KB13')
+
+    # -- 6. description wording and the truncated-window limitation --
+    def test_patch_description_and_window_limitation(self):
+        block=self._patch_block(limitations=['Only the 1 most recent Microsoft releases were evaluated.','WINDOW TOO NARROW. Outstanding updates were still being found in the oldest release evaluated (2026-Sep), so older releases will contain more. This count is a floor, not a total.'],window_truncated=True)
+        f=tf._patch_finding(block,1)
+        self.assertIn('3 CVEs are carried by the outstanding cumulative-update stream',f['description']); self.assertNotIn('security updates are outstanding',f['description'])
+        self.assertTrue(f['window_truncated']); self.assertTrue(f['limitations'].startswith('WINDOW TOO NARROW')); self.assertIn('most recent Microsoft releases',f['limitations'])
+        self.assertFalse(tf._patch_finding(self._patch_block(),1)['window_truncated'])
+
+    # -- 7. KEV prose --
+    def test_patch_kev_prose_unavailable_and_snapshot(self):
+        text=tf._patch_finding(self._patch_block(kev_available=False),1)['exploitability'].lower()
+        self.assertIn('unavailable',text); self.assertNotIn('currently appear',text)
+        block=self._patch_block(); del block['kev_available']; block['missing_updates'][0]['known_exploited']=None
+        f=tf._patch_finding(block,1); self.assertIn('not evaluated',f['exploitability'].lower()); self.assertFalse(f['kev_evaluated'])
+        f=tf._patch_finding(self._patch_block(),1)
+        self.assertIn('As of the catalogue snapshot of 2026-09-30',f['exploitability']); self.assertIn('no outstanding CVE appears',f['exploitability']); self.assertTrue(f['kev_evaluated'])
+        block=self._patch_block(); block['missing_updates'][1]['known_exploited']=True
+        f=tf._patch_finding(block,1); self.assertIn('as of the catalogue snapshot of 2026-09-30',f['exploitability'].lower()); self.assertIn('1 of the outstanding CVEs',f['exploitability']); self.assertIn('CVE-2099-0002',f['exploitability'])
+
+    # -- 8. per-host evidence pointers --
+    def test_patch_evidence_pointers_per_host(self):
+        doc={'schema_version':'1.0','evidence_kind':'MissingUpdateAssessment','generated_utc':'2026-10-01T00:00:00+00:00','source_batch':'B1','status':'MissingUpdates',
+             'kev_available':True,'feed_fetched_utc':'2026-09-30T06:00:00+00:00','hosts':[]}
+        first=self._patch_block(); del first['feed_fetched_utc']; del first['kev_available']; first['status']='MissingUpdates'
+        second=self._patch_block(asset_id='B',computer_name='B',full_build='10.0.20348.5',observed_build='10.0.20348.5',status='MissingUpdates'); del second['feed_fetched_utc']
+        second['missing_updates']=[{'cve':'CVE-2099-0009','kb':'9','fixed_build':'10.0.20348.9','cvss_base_score':7.5,'cvss_vector':'V','known_exploited':False}]
+        doc['hosts']=[first,second]
+        for k,v in first.items(): doc.setdefault(k,v)
+        patch=self._json('MissingUpdates.json',doc)
+        d=self._tests_csv('derived',[{'test_id':'HOST.A.SMB01','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'o','observed':'False','result':'Pass','evidence_file':'Host.A.json','evidence_sha256':'1'*64}])
+        out=self.root/'draft'; c=self._run('Extensions/ToFindings.py','--derived',d,'--patch',patch,'--output',out,'--engagement-id','E')
+        self.assertEqual(c.returncode,0,c.stderr); f=json.loads((out/'findings.json').read_text(encoding='utf-8'))
+        by={x['id']:x for x in f['findings']}
+        self.assertEqual([e['evidence_pointer'] for e in by['VULN-01']['evidence']],['hosts[0]','missing_updates'])
+        self.assertEqual([e['evidence_pointer'] for e in by['VULN-02']['evidence']],['hosts[1]'])
+        self.assertEqual(by['VULN-02']['evidence'][0]['full_build'],'10.0.20348.5'); self.assertEqual(by['VULN-02']['evidence'][0]['feed_fetched_utc'],'2026-09-30T06:00:00+00:00')
+        self.assertIn('2026-09-30',by['VULN-01']['remediation']); self.assertIn('As of the catalogue snapshot of 2026-09-30',by['VULN-02']['exploitability'])
+
+    # -- 9. Greenbone scan_complete is tri-state --
+    def test_greenbone_completion_tri_state(self):
+        self.assertEqual(gbi.completion_state({'scan_run_status':'Done','scan_end':'2026-10-01T09:00:00Z','progress':'100'})[0],True)
+        self.assertIs(gbi.completion_state({'scan_run_status':'Done','scan_end':None,'progress':'100'})[0],None)
+        for status in ('Running','Requested','Queued','Stopped','Interrupted'):
+            self.assertIs(gbi.completion_state({'scan_run_status':status,'scan_end':None,'progress':'42'})[0],False,status)
+        self.assertIs(gbi.completion_state({'scan_run_status':None,'scan_end':None,'progress':None})[0],None)
+        self.assertIs(gbi.completion_state({'scan_run_status':'New','scan_end':None,'progress':None})[0],None)
+        src=self.root/'r.xml'; src.write_text('<report id="r1"><results/></report>',encoding='utf-8'); out=self.root/'r.json'
+        c=self._run('Extensions/GreenboneImport.py','--input',src,'--output',out,'--engagement','E','--source-position','VP')
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertIsNone(d['scan_complete']); self.assertIn('no scan_run_status',d['scan_completion_basis'])
+        self.assertTrue(any('scan completion not established' in l for l in d['limitations']))
+        src2=self.root/'r2.xml'; src2.write_text(_gvm_xml(status='Running',progress='42',end=''),encoding='utf-8'); out2=self.root/'r2.json'
+        self._run('Extensions/GreenboneImport.py','--input',src2,'--output',out2,'--engagement','E','--source-position','VP')
+        d2=json.loads(out2.read_text(encoding='utf-8')); self.assertIs(d2['scan_complete'],False); self.assertIn('Running',d2['scan_completion_basis'])
+        src3=self.root/'r3.xml'; src3.write_text(_gvm_xml(),encoding='utf-8'); out3=self.root/'r3.json'
+        self._run('Extensions/GreenboneImport.py','--input',src3,'--output',out3,'--engagement','E','--source-position','VP')
+        self.assertIs(json.loads(out3.read_text(encoding='utf-8'))['scan_complete'],True)
+
+    # -- 10. VULN.SCAN row and its coverage gap --
+    def test_analyze_emits_scan_row_and_tofindings_gaps_it(self):
+        base={'schema_version':'1.0','tool_version':a.VERSION,'evidence_kind':'GreenboneObservations','engagement_id':'E','source_position':'VP',
+              'scan_run_status':'Running','progress':'42','scan_end':None,'hosts_count':'3','result_count_full':'5','result_count_filtered':'2',
+              'filter_text':'min_qod=70','credentialed_indicator':None,'scan_completion_basis':'synthetic',
+              'observations':[{'host':'h1','port':'445/tcp','name':'High vuln','threat':'High','actionable':True}]}
+        expect={True:'Observation',False:'Inconclusive',None:'Not tested'}
+        for value,result in expect.items():
+            doc=dict(base); doc['scan_complete']=value
+            tests,_=a.import_greenbone(self._json('g_%s.json'%result,doc),'E')
+            scan=tests[0]; self.assertEqual(scan['test_id'],'VULN.SCAN'); self.assertEqual(scan['result'],result,value)
+            self.assertEqual((scan['category'],scan['phase']),('network_vulnerability','active_network'))
+            obs=scan['observed']
+            self.assertEqual((obs['scan_run_status'],obs['progress'],obs['hosts_count'],obs['filter_text'],obs['credentialed_indicator'],obs['result_count']),('Running','42','3','min_qod=70',None,1))
+            self.assertTrue(tf._needs_review(scan))
+        rows=[{'test_id':'VULN.SCAN','category':'network_vulnerability','asset_id':'','site_id':'','source_position':'VP','objective':'Scanner export completeness','observed':'{}','result':'Inconclusive','evidence_file':'g.json','evidence_sha256':'3'*64}]
+        d=self._tests_csv('derived',rows); out=self.root/'draft'
+        c=self._run('Extensions/ToFindings.py','--derived',d,'--output',out,'--engagement-id','E'); self.assertEqual(c.returncode,0,c.stderr)
+        f=json.loads((out/'findings.json').read_text(encoding='utf-8'))
+        sc_gaps=[g for g in f['coverage_gaps'] if g['id'].startswith('GAP-SC-')]
+        self.assertEqual(len(sc_gaps),1); self.assertEqual(sc_gaps[0]['title'],'Scanner export incomplete or completion not established'); self.assertEqual(sc_gaps[0]['affected_assets'],['VP'])
+        self.assertIn('VULN.SCAN',{q['test_id'] for q in f['review_queue']})
+        rows[0]['result']='Observation'; d2=self._tests_csv('derived2',rows); out2=self.root/'draft2'
+        self._run('Extensions/ToFindings.py','--derived',d2,'--output',out2,'--engagement-id','E')
+        self.assertEqual([g for g in json.loads((out2/'findings.json').read_text(encoding='utf-8'))['coverage_gaps'] if g['id'].startswith('GAP-SC-')],[])
+
+    # -- 11. wireless controller unknown states --
+    def test_controller_unknown_states_never_fail_and_notes_pass_through(self):
+        intake={'engagement_id':'E','site_id':'LAB','controller':{'rogue_detection_enabled':None,'wips_enabled':'not_supported',
+                'field_notes':{'wips_enabled':'Vendor has no WIPS feature on this model.'}},
+                'wlans':[{'ssid':'G','purpose':'guest','security':'wpa2-psk','pmf':None,'vlan':30,'client_isolation':'unknown','field_notes':{'client_isolation':'Not shown in the export.'}},
+                         {'ssid':'C','purpose':'corporate','security':'wpa2-enterprise','pmf':'not_supported','vlan':10,'client_isolation':True}]}
+        src=self._json('intake.json',intake); out=self.root/'ctrl.json'
+        c=self._run('Extensions/WirelessControllerImport.py','--input',src,'--output',out,'--engagement','E')
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertEqual((d['controller']['rogue_detection_enabled'],d['controller']['wips_enabled']),('unknown','not_supported'))
+        self.assertEqual(d['controller']['field_notes']['wips_enabled'],'Vendor has no WIPS feature on this model.')
+        self.assertEqual((d['wlans'][0]['pmf'],d['wlans'][0]['client_isolation'],d['wlans'][1]['pmf']),('unknown','unknown','not_supported'))
+        self.assertTrue(any('Control state unknown or not supported' in l for l in d['limitations']))
+        by={t['test_id']:t for t in a.import_wireless_controller(out,'E')[0]}
+        for tid in ('CTRL.rogue_detection','CTRL.wips','CTRL.1.isolation','CTRL.1.pmf','CTRL.2.pmf'):
+            self.assertEqual(by[tid]['result'],'Unknown',tid); self.assertIn('cannot be determined',by[tid]['technical_interpretation'])
+        self.assertEqual(by['CTRL.wips']['observed']['source_note'],'Vendor has no WIPS feature on this model.')
+        self.assertEqual(by['CTRL.1.isolation']['observed']['source_note'],'Not shown in the export.'); self.assertNotIn('source_note',by['CTRL.rogue_detection']['observed'])
+        self.assertEqual(by['CTRL.2.auth']['result'],'Pass'); self.assertEqual(by['CTRL.1.vlan']['result'],'Pass')
+        intake['controller']={'rogue_detection_enabled':True}   # wips missing entirely means unknown, not an error
+        self.assertEqual(self._run('Extensions/WirelessControllerImport.py','--input',self._json('i2.json',intake),'--output',self.root/'c2.json','--engagement','E').returncode,0)
+        self.assertEqual(json.loads((self.root/'c2.json').read_text(encoding='utf-8'))['controller']['wips_enabled'],'unknown')
+        intake['controller']={'rogue_detection_enabled':'maybe','wips_enabled':True}
+        c=self._run('Extensions/WirelessControllerImport.py','--input',self._json('i3.json',intake),'--output',self.root/'c3.json','--engagement','E')
+        self.assertEqual(c.returncode,2); self.assertIn('rogue_detection_enabled',c.stderr)
+    def test_analyze_controller_absent_fields_are_unknown(self):
+        doc={'schema_version':'1.0','tool_version':a.VERSION,'evidence_kind':'WirelessControllerConfig','engagement_id':'E','controller':{},
+             'corporate_vlans':[10],'corporate_vlans_known':True,'wlans':[{'ssid':'G','purpose':'guest','security':'wpa2-enterprise','vlan':30}]}
+        by={t['test_id']:t['result'] for t in a.import_wireless_controller(self._json('c.json',doc),'E')[0]}
+        self.assertEqual((by['CTRL.rogue_detection'],by['CTRL.wips'],by['CTRL.1.isolation'],by['CTRL.1.pmf']),('Unknown','Unknown','Unknown','Unknown'))
+
+    # -- 12. wireless air band coverage --
+    def _air_row(self,bssid,essid,channel):
+        return (f'{bssid}, 2026-10-01 08:00:00, 2026-10-01 08:05:00, {channel},  54, WPA2, CCMP, PSK, -40,  100,  0,'
+                f'   0.  0.  0.  0,  {len(essid)}, {essid}, \r\n')
+    def test_air_band_from_channel(self):
+        for channel,band in (('6','2.4 GHz'),('1','2.4 GHz'),('14','2.4 GHz'),('36','5 GHz'),('177','5 GHz'),('5 6g','6 GHz'),('233 6e','6 GHz'),('37 6g','6 GHz'),
+                             ('15','unknown'),('178','unknown'),('233','unknown'),('-1','unknown'),('','unknown'),('abc','unknown')):
+            self.assertEqual(wai.channel_band(channel),band,channel)
+    def test_air_coverage_block_and_single_band_limitation(self):
+        allow=self._json('allow.json',{'corporate_essids':['CORP'],'authorized_bssids':['AA:BB:CC:DD:EE:01']})
+        src=self.root/'air.csv'; src.write_bytes(_airodump_csv([self._air_row('AA:BB:CC:DD:EE:01','CORP','6'),self._air_row('AA:BB:CC:DD:EE:02','Cafe','36')]).encode('utf-8'))
+        out=self.root/'air.json'
+        c=self._run('Extensions/WirelessAirImport.py','--input',src,'--authorized',allow,'--output',out,'--engagement','E','--source-position','VP')
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertEqual(d['coverage'],{'bands_observed':['2.4 GHz','5 GHz'],'unknown_band_count':0,'ap_count':2,'duration_hint':None})
+        self.assertEqual([o['band'] for o in d['observations']],['2.4 GHz','5 GHz']); self.assertFalse(any('Only the' in l for l in d['limitations']))
+        self.assertEqual(d['observations'][0]['classification'],'AuthorizedAP'); self.assertEqual(d['wps_source'],None)
+        src2=self.root/'air2.csv'; src2.write_bytes(_airodump_csv([self._air_row('AA:BB:CC:DD:EE:01','CORP','6')]).encode('utf-8')); out2=self.root/'air2.json'
+        self._run('Extensions/WirelessAirImport.py','--input',src2,'--authorized',allow,'--output',out2,'--engagement','E','--source-position','VP')
+        d2=json.loads(out2.read_text(encoding='utf-8'))
+        self.assertEqual(d2['coverage']['bands_observed'],['2.4 GHz']); self.assertTrue(any(l.startswith('Only the 2.4 GHz band') for l in d2['limitations']))
+        self.assertEqual(a.import_wireless_air(out2,'E')[0][0]['result'],'Observation')
+
+    # -- 13. analyst dispositions --
+    def test_tofindings_dispositions_applied_and_validated(self):
+        rows=[{'test_id':'HOST.A.SMB02','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'Signing','observed':'','result':'Unknown','evidence_file':'Host.A.json','evidence_sha256':'1'*64},
+              {'test_id':'VULN.00001','category':'network_vulnerability','asset_id':'','site_id':'LAB','source_position':'VP','objective':'SMB vuln','observed':'{}','result':'Candidate','evidence_file':'gb.json','evidence_sha256':'3'*64},
+              {'test_id':'HOST.A.SMB01','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'SMBv1','observed':'False','result':'Pass','evidence_file':'Host.A.json','evidence_sha256':'1'*64}]
+        d=self._tests_csv('derived',rows)
+        self.assertEqual((HERE.parent/'Templates'/'ReviewDispositions.csv').read_text(encoding='utf-8-sig').strip(),','.join(tf.DISPOSITION_FIELDS))
+        evidence=self.root/'shot.txt'; evidence.write_text('independent check',encoding='utf-8'); digest=hashlib.sha256(evidence.read_bytes()).hexdigest()
+        header=','.join(tf.DISPOSITION_FIELDS)+'\n'
+        disp=self.root/'disp.csv'; disp.write_text(header+f'HOST.A.SMB02,ConfirmedFinding,Checked on host,Reviewer,2026-10-01T10:00:00Z,shot.txt,{digest}\n',encoding='utf-8')
+        out=self.root/'draft'; c=self._run('Extensions/ToFindings.py','--derived',d,'--dispositions',disp,'--output',out,'--engagement-id','E')
+        self.assertEqual(c.returncode,0,c.stderr); f=json.loads((out/'findings.json').read_text(encoding='utf-8'))
+        q={e['test_id']:e for e in f['review_queue']}
+        self.assertEqual(q['HOST.A.SMB02']['disposition']['disposition'],'ConfirmedFinding'); self.assertEqual(q['HOST.A.SMB02']['disposition']['evidence_sha256'],digest)
+        self.assertEqual(q['HOST.A.SMB02']['disposition']['reviewer'],'Reviewer'); self.assertEqual(q['VULN.00001']['disposition'],{'disposition':'Pending'})
+        self.assertEqual((f['counts']['dispositions_recorded'],f['counts']['pending']),(1,1)); self.assertIn('Dispositions     : 1 recorded, 1 review rows still Pending',c.stdout)
+        c=self._run('Extensions/ToFindings.py','--derived',d,'--output',self.root/'draft0','--engagement-id','E')
+        f0=json.loads((self.root/'draft0'/'findings.json').read_text(encoding='utf-8'))
+        self.assertTrue(all(e['disposition']=={'disposition':'Pending'} for e in f0['review_queue'])); self.assertEqual((f0['counts']['dispositions_recorded'],f0['counts']['pending']),(0,2))
+        bad=[('unknown',header+'HOST.X.NOPE,Pending,,,,,\n','unknown test_id'),
+             ('disposition',header+'HOST.A.SMB02,Maybe,,,,,\n','Invalid disposition'),
+             ('columns','test_id,disposition\nHOST.A.SMB02,Pending\n','do not match'),
+             ('duplicate',header+'HOST.A.SMB02,Pending,,,,,\nHOST.A.SMB02,Pending,,,,,\n','Duplicate'),
+             ('hash',header+f'HOST.A.SMB02,ConfirmedFinding,,,,shot.txt,{"0"*64}\n','SHA-256 mismatch')]
+        for name,text,message in bad:
+            p=self.root/f'{name}.csv'; p.write_text(text,encoding='utf-8')
+            c=self._run('Extensions/ToFindings.py','--derived',d,'--dispositions',p,'--output',self.root/('bad_'+name),'--engagement-id','E')
+            self.assertNotEqual(c.returncode,0,name); self.assertIn(message,c.stderr,name); self.assertFalse((self.root/('bad_'+name)/'findings.json').exists(),name)
+
+    # -- 14. SealDerived --
+    def test_seal_derived_covers_new_files_and_refuses_raw_batch(self):
+        batch=self._analyze_batch('b',[('A',True,None)],evidence_for=('A',)); derived=self._derived(batch)
+        c=self._run('Extensions/ToFindings.py','--derived',derived,'--output',derived,'--engagement-id','SYNTHETIC')
+        self.assertEqual(c.returncode,0,c.stderr); self.assertIn('SealDerived.py',c.stdout)
+        self.assertNotIn('findings.json',(derived/'Manifest.txt').read_text(encoding='utf-8'))
+        v=self._run('Code/VerifyManifest.py',derived); self.assertEqual(v.returncode,1); self.assertIn('findings.json: UNMANIFESTED',v.stdout)
+        c=self._run('Code/SealDerived.py',derived); self.assertEqual(c.returncode,0,c.stderr); self.assertIn('findings.json',c.stdout)
+        manifest=(derived/'Manifest.txt').read_text(encoding='utf-8')
+        self.assertIn('  findings.json',manifest); self.assertIn('  Tests.csv',manifest); self.assertNotIn('Manifest.txt',manifest)
+        self.assertEqual(self._run('Code/VerifyManifest.py',derived).returncode,0)
+        c=self._run('Code/SealDerived.py',batch); self.assertEqual(c.returncode,2); self.assertIn('Batch.json',c.stderr); self.assertFalse((batch/'Manifest.txt').exists())
+        self.assertEqual(self._run('Code/SealDerived.py').returncode,2)
+        with self.assertRaises(ValueError): sd.seal(self.root/'absent')
 
 
 if __name__=='__main__': unittest.main()

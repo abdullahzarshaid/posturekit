@@ -1,5 +1,5 @@
-{
-  "_comment": "Wireless Layer C intake. Copy this file, fill it from the client's wireless-controller export or console (Cisco WLC/9800, Aruba, Meraki, UniFi, Ruckus, etc.), then run Extensions\\WirelessControllerImport.py. This is a configuration review, not a live connection. Allowed values: purpose = corporate|guest|iot|voice|byod|other ; security = open|wep|wpa-psk|wpa2-psk|wpa3-psk|wpa2-enterprise|wpa3-enterprise|wpa2/wpa3-mixed ; pmf = disabled|optional|required ; vlan = integer or null ; client_isolation = true|false|null.",
+﻿{
+  "_comment": "Wireless Layer C intake. Copy this file, fill it from the client's wireless-controller export or console (Cisco WLC/9800, Aruba, Meraki, UniFi, Ruckus, etc.), then run Extensions\\WirelessControllerImport.py. This is a configuration review, not a live connection. Allowed values: purpose = corporate|guest|iot|voice|byod|other ; security = open|wep|wpa-psk|wpa2-psk|wpa3-psk|wpa2-enterprise|wpa3-enterprise|wpa2/wpa3-mixed ; pmf = disabled|optional|required|unknown|not_supported ; vlan = integer or null ; client_isolation = true|false|null|"unknown"|"not_supported".",
   "engagement_id": "REPLACE-WITH-ENGAGEMENT-ID",
   "site_id": "LAB",
   "controller_vendor": "UniFi",

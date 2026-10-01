@@ -12,6 +12,9 @@ param(
     [System.Management.Automation.PSCredential]$Credential,
     [ValidateRange(30,900)][int]$TimeoutSeconds = 180,
     [ValidateRange(10,5000)][int]$MaxItems = 1000,
+    # Corporate SSID names, semicolon separated, for the WLAN07 attribution. The scope document's
+    # optional wireless.corporate_ssids array takes precedence over this parameter.
+    [string]$CorporateSsids = '',
     [switch]$AuthorizedLabRun
 )
 Set-StrictMode -Version 2.0
@@ -27,6 +30,27 @@ if (-not $AuthorizedLabRun) { throw 'Review code and scope, obtain lab approval,
 Assert-Windows
 $scope = Read-Scope -Path $ScopePath -RequireApproval
 $targets = @($scope.targets)
+# Corporate SSID list for the collector. Precedence: scope wireless.corporate_ssids (JSON array of
+# strings), then -CorporateSsids, then empty. The collector receives the semicolon-joined list and
+# the name of its source; it does not interpret the source. Set-StrictMode 2.0 throws on a missing
+# property, so presence is tested with PSObject.Properties.Match, as for the network block.
+$corporateSsidList = ''
+$corporateSsidSource = ''
+if ($scope.PSObject.Properties.Match('wireless').Count -gt 0 -and $null -ne $scope.wireless) {
+    $w = $scope.wireless
+    if ($w.PSObject.Properties.Match('corporate_ssids').Count -gt 0 -and $null -ne $w.corporate_ssids) {
+        $entries = @($w.corporate_ssids)
+        foreach ($e in $entries) {
+            if ($e -isnot [string]) { throw 'wireless.corporate_ssids must be a JSON array of strings.' }
+            if ($e.Contains(';')) { throw 'A corporate SSID in wireless.corporate_ssids must not contain a semicolon.' }
+        }
+        $names = @($entries | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+        if ($names.Count -gt 0) { $corporateSsidList = [string]::Join(';', [string[]]$names); $corporateSsidSource = 'scope' }
+    }
+}
+if ($corporateSsidList -eq '' -and -not [string]::IsNullOrWhiteSpace($CorporateSsids)) {
+    $corporateSsidList = $CorporateSsids.Trim(); $corporateSsidSource = 'parameter'
+}
 if ($Mode -eq 'Local' -and [string]::IsNullOrWhiteSpace($AssetId)) { throw 'Local mode requires -AssetId.' }
 if ($AssetId) {
     $selected = @($targets | Where-Object { $_.asset_id -ceq $AssetId -and $_.enabled })
@@ -79,8 +103,9 @@ try {
         Add-Content -LiteralPath $log -Value ('{0} START {1}' -f [DateTime]::UtcNow.ToString('o'),$entry.asset_id) -Encoding UTF8
         try {
             # Positional order matches Collect.ps1. Boolean consent is explicit and lab-only.
+            # Eighth and ninth: corporate SSID list and its source (both may be empty strings).
             $arguments = @([string]$scope.engagement_id,[string]$t.site_id,[string]$t.asset_id,
-                $scopeHash,$collectorHash,$MaxItems,$true)
+                $scopeHash,$collectorHash,$MaxItems,$true,$corporateSsidList,$corporateSsidSource)
             if ($Mode -eq 'Local') {
                 $job = Start-Job -FilePath $collector -ArgumentList $arguments -ErrorAction Stop
             } else {

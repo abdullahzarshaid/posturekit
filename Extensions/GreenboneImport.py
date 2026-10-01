@@ -84,6 +84,33 @@ def scan_status(report, task):
     }
 
 
+INCOMPLETE_STATUSES = ('running', 'requested', 'queued', 'stopped', 'interrupted')
+
+
+def completion_state(status):
+    """Tri-state scan completeness: (True|False|None, basis text).
+
+    True only when scan_run_status is Done AND scan_end is present. False when the
+    task is Running/Requested/Queued/Stopped/Interrupted. None when the status or
+    the end time is absent (or the status is not a recognised state): the export
+    does not say whether the scan finished, and that must never read as True.
+    """
+    raw = status.get('scan_run_status')
+    state = (raw or '').strip().lower()
+    end = status.get('scan_end')
+    if state == 'done' and end:
+        return True, 'scan_run_status Done and scan_end %s present' % end
+    if state in INCOMPLETE_STATUSES:
+        progress = status.get('progress')
+        return False, 'scan_run_status %s at %s percent; the export was taken before the task completed' % (
+            raw, progress if progress is not None else 'unknown')
+    if state == 'done':
+        return None, 'scan_run_status Done but no scan_end is recorded, so completion cannot be confirmed'
+    if not state:
+        return None, 'no scan_run_status or task status in the export'
+    return None, 'scan_run_status %s is not a recognised terminal state' % raw
+
+
 def credentialed_indicator(names):
     """Heuristic: true if a login-success NVT is present, false if a login-failure NVT is
     present (and no success), null when neither appears. Documented as heuristic."""
@@ -164,17 +191,19 @@ def main() -> int:
             'Greenbone/GVM feed currency and scan configuration determine coverage; false positives and false negatives are possible.',
             'No exploitation was performed and the scanner severity is not adopted as assessor-assigned severity.',
         ]
-        scan_complete = True
-        if status['scan_run_status'] is not None and status['scan_run_status'].strip().lower() != 'done':
-            scan_complete = False
+        scan_complete, basis = completion_state(status)
+        if scan_complete is False:
             limitations.append('scan export taken before the task completed; status %s at %s percent'
                                % (status['scan_run_status'], status['progress'] if status['progress'] is not None else 'unknown'))
+        elif scan_complete is None:
+            limitations.append('scan completion not established: %s; results must not be treated as full coverage' % basis)
         doc = {
             'schema_version': '1.0', 'tool_version': VERSION, 'evidence_kind': 'GreenboneObservations',
             'engagement_id': args.engagement, 'source_site_id': args.source_site,
             'source_position': args.source_position, 'completed_utc': datetime.now(timezone.utc).isoformat(),
             'input_file': args.input.name, 'input_sha256': sha256(args.input),
             'scan_complete': scan_complete,
+            'scan_completion_basis': basis,
             'credentialed_indicator': credentialed_indicator([o['name'] for o in obs]),
             'credentialed_indicator_note': ('Heuristic: derived from login-status NVT names in the results (true = a login-success '
                                             'NVT is present, false = a login-failure NVT is present, null = neither). Confirm '

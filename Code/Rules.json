@@ -1113,16 +1113,20 @@
       "phase": "host_configuration",
       "category": "wireless",
       "source": "wirelessposture",
-      "field": "PskNetworkCount",
+      "field": "CorporatePskNetworkCount",
       "type": "int",
       "expected": 0,
+      "absent_means": {
+        "result": "Unknown",
+        "interpretation": "No corporate SSID list was supplied for this engagement, so a saved pre-shared-key profile cannot be attributed to corporate policy; the total PSK profile count is recorded as an observation in the evidence."
+      },
       "gate": {
         "field": "WirelessPresent",
         "enabled": 1,
         "disabled": 0
       },
       "basis": "A WPA2/WPA3-Personal pre-shared key is recoverable from any joined endpoint; corporate wireless should use 802.1X",
-      "applicability": "Advisory. Flags saved Personal (PSK) networks because the key can be extracted off any endpoint that stored it. Corporate SSIDs should use 802.1X; home or guest networks are expected exceptions the analyst records.",
+      "applicability": "Applicable to hosts with a wireless adapter when the engagement supplies a corporate SSID list (launcher environment variable POSTUREKIT_CORPORATE_SSIDS, semicolon separated). Counts saved Personal (PSK) profiles whose name is on that list, because the key can be extracted off any endpoint that stored it; corporate SSIDs should use 802.1X. Home, guest and other non-corporate PSK profiles are not counted here; the total PSK profile count (PskNetworkCount) is kept in the evidence as an observation. Without a corporate SSID list the rule records Unknown.",
       "control_refs": [
         {
           "framework": "NIST SP 800-53 Rev 5",

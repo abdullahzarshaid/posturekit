@@ -9,7 +9,7 @@ authorized, rogue/evil-twin (a corporate ESSID from a radio not on the allowlist
 open, hidden, WPS-enabled, or external. It infers no exploitation.
 """
 from __future__ import annotations
-import argparse, csv, hashlib, json, sys
+import argparse, csv, hashlib, json, re, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -88,6 +88,42 @@ def normalise_essid(essid: str) -> str:
     return ''.join(ch for ch in (essid or '').lower() if ch not in ' -_')
 
 
+def channel_band(channel: str) -> str:
+    """Band from the airodump channel column.
+
+    1-14 -> '2.4 GHz'; 36-177 -> '5 GHz'; 1-233 carrying a 6 GHz marker ('6g' or
+    '6e', as some airodump builds and operator annotations write it) -> '6 GHz'.
+    Anything else (blank, -1, an out-of-range number, or a 6 GHz number without
+    the marker, which cannot be told apart from 2.4 GHz) -> 'unknown'.
+    """
+    text = (channel or '').strip().lower()
+    match = re.search(r'-?\d+', text)
+    if not match:
+        return 'unknown'
+    number = int(match.group(0))
+    six_marker = '6g' in text or '6e' in text
+    if six_marker:
+        return '6 GHz' if 1 <= number <= 233 else 'unknown'
+    if 1 <= number <= 14:
+        return '2.4 GHz'
+    if 36 <= number <= 177:
+        return '5 GHz'
+    return 'unknown'
+
+
+def coverage_summary(observations: list) -> dict:
+    """What the capture covered: bands seen (from the channel column), access-point
+    count, and a duration hint that stays null because airodump timestamps only
+    bound the capture file, not the operator's walk."""
+    bands = sorted({o.get('band') for o in observations if o.get('band') and o.get('band') != 'unknown'})
+    return {
+        'bands_observed': bands,
+        'unknown_band_count': sum(1 for o in observations if o.get('band') == 'unknown'),
+        'ap_count': len(observations),
+        'duration_hint': None,
+    }
+
+
 def parse_wash(text: str) -> set:
     # wash output lists WPS-enabled BSSIDs in the first whitespace column.
     wps = set()
@@ -160,8 +196,9 @@ def main() -> int:
                 classification = 'Open'
             else:
                 classification = 'External'
+            channel = (r.get('channel') or '').strip()
             obs.append({
-                'bssid': bssid, 'essid': essid, 'channel': (r.get('channel') or '').strip(),
+                'bssid': bssid, 'essid': essid, 'channel': channel, 'band': channel_band(channel),
                 'privacy': privacy, 'cipher': (r.get('Cipher') or '').strip(),
                 'authentication': (r.get('Authentication') or '').strip(),
                 'power': (r.get('Power') or '').strip(), 'hidden': bool(hidden),
@@ -177,6 +214,13 @@ def main() -> int:
         ]
         if wps_source is None:
             limitations.append('No wash WPS listing was supplied, so WPS state is unknown (null) for every access point.')
+        coverage = coverage_summary(obs)
+        if len(coverage['bands_observed']) == 1:
+            limitations.append('Only the %s band was observed in this capture; access points on the other bands (2.4, 5 and 6 GHz) '
+                               'are not covered, so their absence is not established. Confirm the adapter and channel-hopping scope.'
+                               % coverage['bands_observed'][0])
+        elif not coverage['bands_observed'] and obs:
+            limitations.append('No band could be determined from the channel column, so band coverage of this capture is unknown.')
         doc = {
             'schema_version': '1.0', 'tool_version': VERSION, 'evidence_kind': 'WirelessAirObservations',
             'engagement_id': args.engagement, 'source_site_id': args.source_site,
@@ -184,6 +228,7 @@ def main() -> int:
             'input_file': args.input.name, 'input_sha256': sha256(args.input),
             'corporate_essids': sorted(corp), 'authorized_bssid_count': len(auth_bssids),
             'wps_source': wps_source,
+            'coverage': coverage,
             'observations': obs,
             'limitations': limitations,
         }

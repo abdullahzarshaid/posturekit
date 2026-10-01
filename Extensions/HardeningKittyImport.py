@@ -47,7 +47,7 @@ def main()->int:
              'input_file':args.input.name,'input_sha256':sha256(args.input),'normalized_utc':datetime.now(timezone.utc).isoformat(),
              'results':rows,'limitations':['Imported Audit-mode results are configuration/baseline observations, not proof of exploitability.',
              'assessor-assigned severity is not inherited from the source audit tool. Applicability and important failures require analyst validation.',
-             'HardeningKitty is not bundled by ; version, finding-list provenance, system language and execution context must be recorded.']}
+             'HardeningKitty is not bundled with this tool; version, finding-list provenance, system language and execution context must be recorded.']}
         args.output.write_text(json.dumps(doc,indent=2,ensure_ascii=False),encoding='utf-8')
         print(f'Normalized {len(rows)} HardeningKitty audit rows to {args.output}')
         return 0

@@ -4,7 +4,7 @@
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Tests](https://img.shields.io/badge/tests-155%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-182%20passing-brightgreen.svg)
 ![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
 **Evidence-first, credentialed Windows and network security posture assessment.**
@@ -128,10 +128,11 @@ python Extensions/PatchCheck.py --batch Evidence/Raw/<batch-id> --output Reports
 ## Project layout
 
 ```
-Code/          collector (Run.ps1, Collect.ps1, Common.ps1), analyzer (Analyze.py),
-               rule set (Rules.json), network tester, scope examples, manifest verifier, test suite
+Code/          collector (Run.ps1, Collect.ps1, Common.ps1), analyzer (Analyze.py), evidence gate,
+               rule set (Rules.json), network tester, scope examples, manifest verifier, derived-folder
+               sealer, Python test suite and PowerShell fixture suite
 Extensions/    importers and their runbooks: patch, wireless, network scan, software, findings draft
-Templates/     blank intake templates for an engagement
+Templates/     blank intake templates for an engagement, including the review dispositions sheet
 docs/          architecture diagram
 ```
 
@@ -156,7 +157,14 @@ are the pattern to copy for a new one.
 python Code/Tests.py
 ```
 
-The suite runs on synthetic data only: no PowerShell is executed and no host is contacted.
+The Python suite (182 tests) runs on synthetic data only: no PowerShell is executed and no host is contacted.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File Code\CollectorHelperTests.ps1
+```
+
+The PowerShell fixture suite (79 checks) loads the pure wireless helpers out of `Collect.ps1` and runs them
+against fixture text. It needs Windows PowerShell 5.1 but no wireless adapter, no `netsh` call and no key.
 
 ## Contributing
 

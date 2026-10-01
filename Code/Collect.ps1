@@ -14,7 +14,12 @@ param(
     [Parameter(Mandatory=$true)][string]$ScopeHash,
     [Parameter(Mandatory=$true)][string]$CollectorHash,
     [ValidateRange(10,5000)][int]$MaxItems = 1000,
-    [bool]$AuthorizedLabRun = $false
+    [bool]$AuthorizedLabRun = $false,
+    # Eighth positional: corporate SSID list, semicolon separated, resolved by Run.ps1 from the
+    # scope document (wireless.corporate_ssids) or its -CorporateSsids parameter. Ninth: where
+    # that list came from ("scope" or "parameter"); it is recorded, never interpreted.
+    [string]$CorporateSsids = '',
+    [string]$CorporateSsidSource = ''
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -758,116 +763,528 @@ Capture 'lapsconfig' @('Get-ItemProperty') {
 
 # ---- Wireless (Layer A: host-side 802.11 configuration via netsh wlan; no radio/over-the-air) ----
 # Parsed once from netsh text (English labels). Read-only; no PSKs are read or exported.
-$wlanPresent = $false; $wlanDetermined = $false; $wlanIface = $null; $wlanProfiles = @(); $wlanAdapter = $null
+
+# ---- BEGIN WIRELESS HELPERS ----
+# Pure helpers: text and objects in, objects out. Nothing in this region calls netsh,
+# Get-NetAdapter, the registry or the file system, so Code\CollectorHelperTests.ps1 can
+# extract this region from Collect.ps1 by its two marker comments and run it on a host
+# without a wireless adapter. The tested code is therefore byte-identical to the shipped
+# code. Keep every function in this region free of side effects.
 function Get-NetshField { param([string]$Text,[string]$Key)
     $m=[regex]::Match($Text,"(?im)^\s*$([regex]::Escape($Key))\s*:\s*(.+?)\s*$"); if($m.Success){$m.Groups[1].Value.Trim()}else{$null} }
-try {
-    $ifaceText = (& netsh wlan show interfaces 2>&1 | Out-String)
-    # Presence is positive evidence only: netsh must report at least one interface. Any
-    # error text (service not running, WLAN feature absent on Server, unknown command)
-    # leaves the host recorded as having no wireless interface.
-    $ifCount = [regex]::Match($ifaceText, '(?i)there (?:is|are) (\d+) interface')
-    # netsh prints localized text. The English phrases below are the only ones understood, so
-    # presence is determined only when one of them matched: a recognised "none" message, or
-    # an interface count. Anything else (another display language, an unexpected message)
-    # leaves presence undetermined and the wireless rules record Unknown, never a false
-    # "no wireless adapter".
-    if ($ifaceText -match 'no wireless interface' -or $ifaceText -match 'is not running' -or $ifaceText -match 'AutoConfig') {
-        $wlanPresent = $false; $wlanDetermined = $true
-    } elseif (-not $ifCount.Success) {
-        $wlanPresent = $false; $wlanDetermined = $false
-    } elseif ([int]$ifCount.Groups[1].Value -lt 1) {
-        $wlanPresent = $false; $wlanDetermined = $true
+
+function Test-WirelessAdapter {
+    # True when a Get-NetAdapter style object describes an 802.11 adapter: PhysicalMediaType
+    # 'Native 802.11', IANA InterfaceType 71 (ieee80211), or a Wi-Fi style name/description.
+    param([object]$Adapter)
+    if ($null -eq $Adapter) { return $false }
+    $p = $Adapter.PSObject.Properties
+    $media = ''; $ifType = $null; $name = ''; $desc = ''
+    if ($p['PhysicalMediaType'] -and $null -ne $Adapter.PhysicalMediaType) { $media = [string]$Adapter.PhysicalMediaType }
+    if ($p['InterfaceType'] -and $null -ne $Adapter.InterfaceType) { try { $ifType = [int]$Adapter.InterfaceType } catch { $ifType = $null } }
+    if ($p['Name'] -and $null -ne $Adapter.Name) { $name = [string]$Adapter.Name }
+    if ($p['InterfaceDescription'] -and $null -ne $Adapter.InterfaceDescription) { $desc = [string]$Adapter.InterfaceDescription }
+    if ($media -match '(?i)native 802\.11') { return $true }
+    if ($null -ne $ifType -and $ifType -eq 71) { return $true }
+    if ($name -match '(?i)Wi-?Fi|Wireless|802\.11') { return $true }
+    if ($desc -match '(?i)Wi-?Fi|Wireless|802\.11') { return $true }
+    return $false
+}
+
+function Get-WirelessAdapterNames {
+    # Names of the 802.11 adapters in a Get-NetAdapter style list. Always wrap the call in @().
+    param([AllowNull()][object[]]$Adapters)
+    $names = New-Object 'System.Collections.Generic.List[string]'
+    if ($null -eq $Adapters) { return @($names.ToArray()) }
+    foreach ($a in $Adapters) {
+        if (Test-WirelessAdapter $a) {
+            $n = '(unnamed)'
+            if ($a.PSObject.Properties['Name'] -and $null -ne $a.Name) { $n = [string]$a.Name }
+            [void]$names.Add($n)
+        }
+    }
+    return @($names.ToArray())
+}
+
+function Resolve-WirelessPresence {
+    # Three-way wireless presence (1, 0 or $null), always with a stated basis.
+    #   InterfaceText : text of "netsh wlan show interfaces" in whatever language the host prints.
+    #   Adapters      : the Get-NetAdapter result; @() when the host lists no adapters at all;
+    #                   $null when Get-NetAdapter could not be run (adapter evidence unavailable).
+    # Only the English netsh phrases are recognised. Anything else is "not understood" and
+    # yields $null (never 0) unless the adapter list proves that no 802.11 adapter exists.
+    param([AllowNull()][string]$InterfaceText, [AllowNull()][object[]]$Adapters)
+    $text = if ($null -eq $InterfaceText) { '' } else { [string]$InterfaceText }
+    $adapterKnown = ($null -ne $Adapters)
+    $wifi = @(Get-WirelessAdapterNames $Adapters)
+    $noAdapter = ($adapterKnown -and $wifi.Count -eq 0)
+    $adapterNote = 'the adapter list is unavailable, so absence of an adapter could not be corroborated'
+    if ($adapterKnown -and $wifi.Count -eq 0) { $adapterNote = 'no 802.11 adapter listed by Get-NetAdapter' }
+    if ($adapterKnown -and $wifi.Count -gt 0) { $adapterNote = 'Get-NetAdapter lists an 802.11 adapter (' + ($wifi -join ', ') + ')' }
+    $r = [ordered]@{ Present=$null; Basis=$null; InterfaceCount=$null; NetshUnderstood=$false;
+                     AdapterListed=$(if ($adapterKnown) { ($wifi.Count -gt 0) } else { $null }); AdapterNames=@($wifi) }
+    $count  = [regex]::Match($text, '(?i)there (?:is|are) (\d+) interfaces? on the system')
+    $none   = ($text -match '(?i)there is no wireless interface on the system')
+    $svc    = ($text -match '(?i)is not running')
+    $denied = ($text -match '(?i)access (?:is )?denied')
+    if ($count.Success) {
+        $n = [int]$count.Groups[1].Value
+        $r.InterfaceCount = $n; $r.NetshUnderstood = $true
+        if ($n -ge 1) {
+            $r.Present = 1; $r.Basis = "netsh wlan show interfaces reports $n wireless interface(s) on the system."
+            return [pscustomobject]$r
+        }
+        $none = $true
+    }
+    if ($none) {
+        $r.NetshUnderstood = $true
+        if ($noAdapter) { $r.Present = 0; $r.Basis = "netsh wlan show interfaces reports no wireless interface and $adapterNote." }
+        else { $r.Present = $null; $r.Basis = "netsh wlan show interfaces reports no wireless interface but $adapterNote; presence not determined." }
+        return [pscustomobject]$r
+    }
+    if ($svc) {
+        if ($noAdapter) { $r.Present = 0; $r.Basis = "The WLAN AutoConfig service (wlansvc) is not running and $adapterNote." }
+        else { $r.Present = $null; $r.Basis = "The WLAN AutoConfig service (wlansvc) is not running, so netsh could not enumerate wireless interfaces; $adapterNote; presence not determined." }
+        return [pscustomobject]$r
+    }
+    if ($denied) {
+        if ($noAdapter) { $r.Present = 0; $r.Basis = "netsh wlan show interfaces was refused (access denied) and $adapterNote." }
+        else { $r.Present = $null; $r.Basis = "netsh wlan show interfaces was refused (access denied); $adapterNote; presence not determined." }
+        return [pscustomobject]$r
+    }
+    $first = @(($text -split "`r?`n") | Where-Object { $_.Trim() -ne '' } | Select-Object -First 1)
+    $firstLine = if ($first.Count -eq 0) { '(no output)' } else { ([string]$first[0]).Trim() }
+    if ($firstLine.Length -gt 120) { $firstLine = $firstLine.Substring(0, 120) + '...' }
+    if ($noAdapter) {
+        $r.Present = 0
+        $r.Basis = "netsh wlan show interfaces output was not understood (only the English phrases are recognised; first line: '$firstLine') but $adapterNote."
     } else {
-        $wlanPresent = $true; $wlanDetermined = $true
-        # AKM suite (last octet of 00-0f-ac:NN) indicates PMF: 2=PSK(no PMF), 6=PSK-SHA256(PMF), 8=SAE/WPA3(PMF).
-        $akmMatch=[regex]::Match($ifaceText,'(?im)akm\s*=\s*00-0f-ac:0*([0-9]+)')
-        $connAkm= if($akmMatch.Success){[int]$akmMatch.Groups[1].Value}else{$null}
+        $r.Present = $null
+        $r.Basis = "netsh wlan show interfaces output was not understood (only the English phrases are recognised; first line: '$firstLine'); $adapterNote; presence not determined."
+    }
+    return [pscustomobject]$r
+}
+
+function Resolve-WirelessProfileList {
+    # Parses "netsh wlan show profiles". Understood when at least one "All User Profile" line
+    # is present, or the recognised English empty-list text appears (a "There is no profile"
+    # message, or a "User profiles" section containing only <None>). Names keep their exact
+    # spelling including trailing spaces, because netsh needs the exact name to read a profile.
+    param([AllowNull()][string]$ProfilesText)
+    $text = if ($null -eq $ProfilesText) { '' } else { [string]$ProfilesText }
+    $names = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in ($text -split "`r?`n")) {
+        $m = [regex]::Match($line, '^\s*All User Profile\s*:\s?(.*)$')
+        if ($m.Success) {
+            $v = $m.Groups[1].Value.TrimEnd("`r")
+            if ($v.Trim() -ne '') { [void]$names.Add($v) }
+        }
+    }
+    $r = [ordered]@{ Understood=$false; Names=@($names.ToArray()); Basis=$null; Error=$null }
+    if ($names.Count -gt 0) {
+        $r.Understood = $true; $r.Basis = "netsh wlan show profiles listed $($names.Count) all-user profile(s)."
+        return [pscustomobject]$r
+    }
+    if ($text -match '(?i)there (?:is|are) no profiles?') {
+        $r.Understood = $true; $r.Basis = 'netsh wlan show profiles reports that no profile is saved.'
+        return [pscustomobject]$r
+    }
+    if ($text -match '(?im)^\s*User profiles\s*$' -and $text -match '(?im)^\s*<None>\s*$') {
+        $r.Understood = $true; $r.Basis = 'netsh wlan show profiles lists a User profiles section with no entries.'
+        return [pscustomobject]$r
+    }
+    $first = @(($text -split "`r?`n") | Where-Object { $_.Trim() -ne '' } | Select-Object -First 1)
+    $firstLine = if ($first.Count -eq 0) { '(no output)' } else { ([string]$first[0]).Trim() }
+    if ($firstLine.Length -gt 160) { $firstLine = $firstLine.Substring(0, 160) + '...' }
+    $r.Error = "netsh wlan show profiles output was not understood (only the English phrases are recognised; first line: '$firstLine'). Saved profiles could not be enumerated."
+    return [pscustomobject]$r
+}
+
+function Resolve-EapServerValidation {
+    # Namespace-aware read of an exported WLAN profile XML (exported without key=clear, so no
+    # key material is present). Returns ServerCertValidation $true / $false / $null with a
+    # basis, plus TrustedRootCount and ServerNamesPresent as separate observations.
+    #   PEAP (25) and EAP-TTLS (21): the PerformServerValidation element decides.
+    #   EAP-TLS (13): the ServerValidation block decides (user prompt disabled AND a trusted
+    #   root present -> true; user prompt allowed -> false; neither root nor names -> null).
+    param([AllowNull()][string]$ProfileXml)
+    function Get-XmlText([object]$Node) { if ($null -eq $Node) { return '' } return ([string]$Node.InnerText).Trim() }
+    function Measure-NonEmpty([object]$Nodes) { $c = 0; if ($null -ne $Nodes) { foreach ($x in $Nodes) { if ((Get-XmlText $x) -ne '') { $c++ } } } return $c }
+    $r = [ordered]@{ ServerCertValidation=$null; ServerCertValidationBasis=$null; EapType=$null; TrustedRootCount=0; ServerNamesPresent=$false }
+    if ([string]::IsNullOrWhiteSpace($ProfileXml)) { $r.ServerCertValidationBasis = 'No profile XML was available to read.'; return [pscustomobject]$r }
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.XmlResolver = $null
+    try { $doc.LoadXml($ProfileXml) } catch {
+        $r.ServerCertValidationBasis = 'The profile XML could not be parsed: ' + $_.Exception.Message
+        return [pscustomobject]$r
+    }
+    $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+    $ns.AddNamespace('wlan',  'http://www.microsoft.com/networking/WLAN/profile/v1')
+    $ns.AddNamespace('onex',  'http://www.microsoft.com/networking/OneX/v1')
+    $ns.AddNamespace('eh',    'http://www.microsoft.com/provisioning/EapHostConfig')
+    $ns.AddNamespace('ec',    'http://www.microsoft.com/provisioning/EapCommon')
+    $ns.AddNamespace('bec',   'http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1')
+    $ns.AddNamespace('peap',  'http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV1')
+    $ns.AddNamespace('peap2', 'http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2')
+    $ns.AddNamespace('tls',   'http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV1')
+    $ns.AddNamespace('ttls',  'http://www.microsoft.com/provisioning/EapTtlsConnectionPropertiesV1')
+    $typeNode = $doc.SelectSingleNode('//eh:EapHostConfig/eh:EapMethod/ec:Type', $ns)
+    if ($null -eq $typeNode) {
+        $r.ServerCertValidationBasis = 'No EapHostConfig/EapMethod/Type element was found in the profile XML, so the EAP method could not be identified.'
+        return [pscustomobject]$r
+    }
+    $eapType = $null
+    try { $eapType = [int]$typeNode.InnerText.Trim() } catch { $eapType = $null }
+    $r.EapType = $eapType
+    $config = $doc.SelectSingleNode('//eh:EapHostConfig/eh:Config', $ns)
+    if ($null -eq $config) {
+        $r.ServerCertValidationBasis = "EAP type ${eapType}: the EapHostConfig/Config element is missing, so the method configuration could not be read."
+        return [pscustomobject]$r
+    }
+    if ($eapType -eq 25) {
+        $label = 'PEAP'
+        $r.TrustedRootCount = Measure-NonEmpty ($config.SelectNodes('.//peap:ServerValidation/peap:TrustedRootCA', $ns))
+        $snNode = $config.SelectSingleNode('.//peap:ServerValidation/peap:ServerNames', $ns)
+        $psv = $config.SelectSingleNode('.//peap2:PerformServerValidation', $ns)
+        $r.ServerNamesPresent = ((Get-XmlText $snNode) -ne '')
+        if ($null -eq $psv) {
+            # Tolerate the element in an unexpected namespace, but say so in the basis.
+            $psv = $config.SelectSingleNode(".//*[local-name()='PerformServerValidation']")
+            $nsNote = if ($null -ne $psv) { ' (element found outside its documented namespace)' } else { '' }
+        } else { $nsNote = '' }
+        if ($null -eq $psv) {
+            $r.ServerCertValidationBasis = "$label (EAP type $eapType): the PerformServerValidation element is missing from the profile, so the server-certificate validation setting is not determined."
+            return [pscustomobject]$r
+        }
+        $v = (Get-XmlText $psv).ToLowerInvariant()
+        if ($v -eq 'true') { $r.ServerCertValidation = $true; $r.ServerCertValidationBasis = "$label (EAP type $eapType): PerformServerValidation is true$nsNote." }
+        elseif ($v -eq 'false') { $r.ServerCertValidation = $false; $r.ServerCertValidationBasis = "$label (EAP type $eapType): PerformServerValidation is false$nsNote; the authentication server certificate is not validated." }
+        else { $r.ServerCertValidationBasis = "$label (EAP type $eapType): PerformServerValidation holds the unrecognised value '$v'; not determined." }
+        return [pscustomobject]$r
+    }
+    if ($eapType -eq 21) {
+        # EAP-TTLS is judged from its own ServerValidation block (EapTtlsConnectionPropertiesV1):
+        # DisablePrompt true means the user is not prompted and validation is enforced;
+        # TrustedRootCAHash entries name the pinned roots.
+        $sv = $config.SelectSingleNode('.//ttls:ServerValidation', $ns)
+        if ($null -eq $sv) {
+            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): the ServerValidation block is missing from the profile, so the server-certificate validation setting is not determined.'
+            return [pscustomobject]$r
+        }
+        $r.TrustedRootCount = Measure-NonEmpty ($sv.SelectNodes('ttls:TrustedRootCAHash', $ns))
+        $snNode = $sv.SelectSingleNode('ttls:ServerNames', $ns)
+        $r.ServerNamesPresent = ((Get-XmlText $snNode) -ne '')
+        $promptNode = $sv.SelectSingleNode('ttls:DisablePrompt', $ns)
+        $prompt = if ($null -eq $promptNode) { $null } else { (Get-XmlText $promptNode).ToLowerInvariant() }
+        if ($prompt -eq 'false') {
+            $r.ServerCertValidation = $false
+            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): DisablePrompt is false, so the user can accept any server certificate.'
+            return [pscustomobject]$r
+        }
+        if ($r.TrustedRootCount -eq 0 -and -not $r.ServerNamesPresent) {
+            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): the ServerValidation block names no trusted root CA hash and no server names, so what the client would validate against is not determined.'
+            return [pscustomobject]$r
+        }
+        if ($prompt -eq 'true' -and $r.TrustedRootCount -ge 1) {
+            $r.ServerCertValidation = $true
+            $r.ServerCertValidationBasis = "EAP-TTLS (EAP type 21): DisablePrompt is true and $($r.TrustedRootCount) trusted root CA hash(es) are pinned."
+            return [pscustomobject]$r
+        }
+        if ($null -eq $prompt) {
+            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): the DisablePrompt element is missing from the ServerValidation block; not determined.'
+        } elseif ($prompt -eq 'true') {
+            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): DisablePrompt is true but no trusted root CA hash is pinned (server names only), so validation against a trusted root is not determined.'
+        } else {
+            $r.ServerCertValidationBasis = "EAP-TTLS (EAP type 21): DisablePrompt holds the unrecognised value '$prompt'; not determined."
+        }
+        return [pscustomobject]$r
+    }
+    if ($eapType -eq 13) {
+        $sv = $config.SelectSingleNode('.//tls:EapType/tls:ServerValidation', $ns)
+        if ($null -eq $sv) { $sv = $config.SelectSingleNode('.//tls:ServerValidation', $ns) }
+        if ($null -eq $sv) {
+            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): the ServerValidation block is missing from the profile, so the server-certificate validation setting is not determined.'
+            return [pscustomobject]$r
+        }
+        $r.TrustedRootCount = Measure-NonEmpty ($sv.SelectNodes('tls:TrustedRootCA', $ns))
+        $snNode = $sv.SelectSingleNode('tls:ServerNames', $ns)
+        $r.ServerNamesPresent = ((Get-XmlText $snNode) -ne '')
+        $promptNode = $sv.SelectSingleNode('tls:DisableUserPromptForServerValidation', $ns)
+        $prompt = if ($null -eq $promptNode) { $null } else { (Get-XmlText $promptNode).ToLowerInvariant() }
+        if ($prompt -eq 'false') {
+            $r.ServerCertValidation = $false
+            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): DisableUserPromptForServerValidation is false, so the user can accept any server certificate.'
+            return [pscustomobject]$r
+        }
+        if ($r.TrustedRootCount -eq 0 -and -not $r.ServerNamesPresent) {
+            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): the ServerValidation block names no trusted root CA and no server names, so what the client would validate against is not determined.'
+            return [pscustomobject]$r
+        }
+        if ($prompt -eq 'true' -and $r.TrustedRootCount -ge 1) {
+            $r.ServerCertValidation = $true
+            $r.ServerCertValidationBasis = "EAP-TLS (EAP type 13): DisableUserPromptForServerValidation is true and $($r.TrustedRootCount) trusted root CA thumbprint(s) are pinned."
+            return [pscustomobject]$r
+        }
+        if ($null -eq $prompt) {
+            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): the DisableUserPromptForServerValidation element is missing from the ServerValidation block; not determined.'
+        } elseif ($prompt -eq 'true') {
+            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): DisableUserPromptForServerValidation is true but no trusted root CA is pinned (server names only), so validation against a trusted root is not determined.'
+        } else {
+            $r.ServerCertValidationBasis = "EAP-TLS (EAP type 13): DisableUserPromptForServerValidation holds the unrecognised value '$prompt'; not determined."
+        }
+        return [pscustomobject]$r
+    }
+    $r.ServerCertValidationBasis = "EAP type $(if ($null -eq $eapType) { '(unreadable)' } else { $eapType }) has no server-certificate validation rule in this collector; not determined."
+    return [pscustomobject]$r
+}
+
+function Get-AkmSuite {
+    # The negotiated AKM suite selector (last octet of 00-0f-ac:NN) from netsh wlan show interfaces, or $null.
+    param([AllowNull()][string]$InterfaceText)
+    if ($null -eq $InterfaceText) { return $null }
+    $m = [regex]::Match([string]$InterfaceText, '(?im)akm\s*=\s*00-0f-ac:0*([0-9]+)')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return $null
+}
+
+function Resolve-Pmf {
+    # Management-frame protection decided only from the negotiated AKM suite. Suites that
+    # mandate protected management frames give $true; any other suite, or no suite, gives
+    # $null, never $false, because netsh does not expose the RSN capability bits (MFPC/MFPR).
+    param([AllowNull()][object]$AkmSuite)
+    $mandating = @(5,6,8,9,11,12,13,18,19,20)
+    $names = @{ 1='802.1X'; 2='PSK'; 3='FT-802.1X'; 4='FT-PSK'; 5='802.1X-SHA256'; 6='PSK-SHA256'; 7='TDLS';
+                8='SAE'; 9='FT-SAE'; 11='Suite B 802.1X-SHA256'; 12='Suite B 802.1X-SHA384'; 13='FT-802.1X-SHA384';
+                18='OWE'; 19='FT-PSK-SHA384'; 20='PSK-SHA384' }
+    $akm = $null
+    if ($null -ne $AkmSuite) { try { $akm = [int]$AkmSuite } catch { $akm = $null } }
+    if ($null -eq $akm) {
+        return [pscustomobject]@{ Pmf=$null; Basis='No AKM suite could be read from netsh wlan show interfaces. netsh does not expose the RSN capability bits (MFPC/MFPR), so management-frame protection is not determined.' }
+    }
+    $label = if ($names.ContainsKey($akm)) { $names[$akm] } else { 'unlisted suite' }
+    $sel = ('00-0f-ac:{0:D2}' -f $akm)
+    if ($mandating -contains $akm) {
+        return [pscustomobject]@{ Pmf=$true; Basis="Negotiated AKM suite $sel ($label) mandates protected management frames." }
+    }
+    return [pscustomobject]@{ Pmf=$null; Basis="Negotiated AKM suite $sel ($label) does not itself mandate protected management frames. netsh does not expose the RSN capability bits (MFPC/MFPR), so the absence of a mandating suite is not proof that PMF is off; not determined." }
+}
+
+function Test-WlanConnected {
+    # True only when the netsh State field is exactly "connected" (surrounding whitespace ignored).
+    param([AllowNull()][string]$State)
+    if ($null -eq $State) { return $false }
+    return (([string]$State).Trim() -eq 'connected')
+}
+
+function ConvertFrom-CorporateSsidList {
+    # Semicolon-separated corporate SSID list from the launcher environment. $null when absent or empty.
+    param([AllowNull()][string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $items = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($part in ([string]$Text).Split(';')) { $t = $part.Trim(); if ($t -ne '') { [void]$items.Add($t) } }
+    if ($items.Count -eq 0) { return $null }
+    return @($items.ToArray())
+}
+
+function Get-CorporatePskCount {
+    # Saved Personal (PSK) profiles whose name is on the corporate SSID list; $null when no list was supplied.
+    param([AllowNull()][object[]]$Profiles, [AllowNull()][string[]]$CorporateSsids)
+    if ($null -eq $CorporateSsids -or @($CorporateSsids).Count -eq 0) { return $null }
+    $set = @{}
+    foreach ($s in $CorporateSsids) { $set[([string]$s).Trim().ToLowerInvariant()] = $true }
+    $n = 0
+    if ($null -ne $Profiles) {
+        foreach ($p in $Profiles) {
+            $auth = ''; $name = ''
+            if ($p.PSObject.Properties['Authentication'] -and $null -ne $p.Authentication) { $auth = [string]$p.Authentication }
+            if ($p.PSObject.Properties['Name'] -and $null -ne $p.Name) { $name = [string]$p.Name }
+            if ($auth -match 'Personal' -and $set.ContainsKey($name.Trim().ToLowerInvariant())) { $n++ }
+        }
+    }
+    return $n
+}
+
+function Resolve-EnterpriseValidationCounts {
+    # Counts over the 802.1X profiles: NoValidation counts only ServerCertValidation exactly
+    # $false; Unknown counts $null. When Unknown is above zero and no profile is known-false,
+    # NoValidation is emitted as $null so the WLAN04 rule records Unknown rather than Pass.
+    param([AllowNull()][object[]]$Profiles)
+    $ent = 0; $noVal = 0; $unknown = 0
+    if ($null -ne $Profiles) {
+        foreach ($p in $Profiles) {
+            $dot1x = $false
+            if ($p.PSObject.Properties['Dot1X'] -and $null -ne $p.Dot1X) { $dot1x = [bool]$p.Dot1X }
+            if (-not $dot1x) { continue }
+            $ent++
+            $v = $null
+            if ($p.PSObject.Properties['ServerCertValidation']) { $v = $p.ServerCertValidation }
+            if ($null -eq $v) { $unknown++ }
+            elseif ($v -is [bool] -and $v -eq $false) { $noVal++ }
+        }
+    }
+    $emit = if ($unknown -gt 0 -and $noVal -eq 0) { $null } else { $noVal }
+    return [pscustomobject]@{ EnterpriseNetworkCount=$ent; EnterpriseNoServerValidationCount=$emit; EnterpriseServerValidationUnknownCount=$unknown; KnownNoValidation=$noVal }
+}
+
+function Resolve-OpenNetworkCounts {
+    # Open-network counts. A profile is Open only when its Authentication says so; a profile
+    # whose Authentication could not be read (null or empty) is Unreadable, never Open. When
+    # any profile is unreadable and no profile is known to be open, both open counts are
+    # emitted as $null so WLAN01 and WLAN06 record Unknown rather than a false Pass.
+    param([AllowNull()][object[]]$Profiles)
+    $open = 0; $openAuto = 0
+    $unreadable = New-Object 'System.Collections.Generic.List[string]'
+    if ($null -ne $Profiles) {
+        foreach ($p in $Profiles) {
+            $auth = $null; $mode = ''; $name = ''
+            if ($p.PSObject.Properties['Authentication']) { $auth = $p.Authentication }
+            if ($p.PSObject.Properties['ConnectionMode'] -and $null -ne $p.ConnectionMode) { $mode = [string]$p.ConnectionMode }
+            if ($p.PSObject.Properties['Name'] -and $null -ne $p.Name) { $name = [string]$p.Name }
+            if ($null -eq $auth -or [string]::IsNullOrWhiteSpace([string]$auth)) { [void]$unreadable.Add($name); continue }
+            if ([string]$auth -match 'Open') {
+                $open++
+                if ($mode -match 'auto') { $openAuto++ }
+            }
+        }
+    }
+    $emitOpen = $open; $emitAuto = $openAuto
+    if ($unreadable.Count -gt 0 -and $open -eq 0) { $emitOpen = $null; $emitAuto = $null }
+    return [pscustomobject]@{ OpenNetworkCount=$emitOpen; OpenAutoConnectCount=$emitAuto; UnreadableProfileCount=$unreadable.Count;
+                              UnreadableProfileNames=@($unreadable.ToArray()); KnownOpen=$open; KnownOpenAuto=$openAuto }
+}
+# ---- END WIRELESS HELPERS ----
+
+$wlanPresence = $null; $wlanIface = $null; $wlanProfiles = @(); $wlanAdapter = $null
+$wlanProfilesStatus = 'NotAttempted'; $wlanProfilesError = $null; $wlanProfileListBasis = $null
+# Corporate SSID list (semicolon separated). Precedence: the collector parameter filled by
+# Run.ps1 (from the scope document or its -CorporateSsids switch), then the POSTUREKIT_CORPORATE_SSIDS
+# environment variable (Local mode only; it does not cross WinRM), else null, in which case no
+# attribution is possible and the corporate PSK count is emitted as null.
+$wlanCorporateSsids = $null; $wlanCorporateSsidSource = $null
+if (-not [string]::IsNullOrWhiteSpace($CorporateSsids)) {
+    $wlanCorporateSsids = ConvertFrom-CorporateSsidList $CorporateSsids
+    if ($null -ne $wlanCorporateSsids) {
+        $wlanCorporateSsidSource = if ($CorporateSsidSource -in @('scope','parameter')) { $CorporateSsidSource } else { 'parameter' }
+    }
+}
+if ($null -eq $wlanCorporateSsids) {
+    $wlanCorporateSsids = ConvertFrom-CorporateSsidList $env:POSTUREKIT_CORPORATE_SSIDS
+    if ($null -ne $wlanCorporateSsids) { $wlanCorporateSsidSource = 'environment' }
+}
+# The adapter list corroborates a negative netsh result. $null means it could not be read.
+$netAdapters = $null
+try { $netAdapters = @(Get-NetAdapter -ErrorAction Stop | Select-Object Name,InterfaceDescription,InterfaceType,PhysicalMediaType) } catch { $netAdapters = $null }
+# netsh writes UTF-8 bytes for profile names; PowerShell decodes native output with the console
+# encoding, so a name with a non-ASCII character is mangled under the OEM code page and the
+# profile can then not be read back by name. Switch the console to UTF-8 for the netsh wlan
+# calls only and restore it afterwards. In a session without a console the setter can throw;
+# that is tolerated and the previous behaviour applies.
+$prevConsoleEncoding = $null; $wlanUtf8Console = $false
+try { $prevConsoleEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $wlanUtf8Console = $true } catch { $wlanUtf8Console = $false }
+try {
+$ifaceText = ''
+try { $ifaceText = (& netsh wlan show interfaces 2>&1 | Out-String) } catch { $ifaceText = 'netsh wlan show interfaces failed: ' + $_.Exception.Message }
+$wlanPresence = Resolve-WirelessPresence -InterfaceText $ifaceText -Adapters $netAdapters
+if ($wlanPresence.Present -eq 1) {
+    try {
         $wlanIface = [pscustomobject]@{
             State=Get-NetshField $ifaceText 'State'; Ssid=Get-NetshField $ifaceText 'SSID';
             Authentication=Get-NetshField $ifaceText 'Authentication'; Cipher=Get-NetshField $ifaceText 'Cipher';
-            Band=Get-NetshField $ifaceText 'Band'; RadioType=Get-NetshField $ifaceText 'Radio type'; AkmSuite=$connAkm }
+            Band=Get-NetshField $ifaceText 'Band'; RadioType=Get-NetshField $ifaceText 'Radio type'; AkmSuite=(Get-AkmSuite $ifaceText) }
         $drvText = (& netsh wlan show drivers 2>&1 | Out-String)
         $wlanAdapter = [pscustomobject]@{
             RadioTypesSupported=Get-NetshField $drvText 'Radio types supported';
             HostedNetworkSupported=Get-NetshField $drvText 'Hosted network supported' }
-        $names = @((& netsh wlan show profiles 2>&1) | Select-String 'All User Profile' | ForEach-Object { ($_ -split ':',2)[1].Trim() })
-        foreach ($n in $names) {
+    } catch {}
+}
+if ($null -ne $wlanPresence.Present -and $wlanPresence.Present -eq 0) {
+    $wlanProfilesStatus = 'Skipped'
+    $wlanProfileListBasis = 'Profile enumeration not attempted: ' + $wlanPresence.Basis
+} else {
+    # Attempted whenever presence is 1 or undetermined, so a failed or non-understood
+    # enumeration is recorded as an Error on the wirelessprofiles source, never as an
+    # empty Collected list.
+    try {
+        $profText = (& netsh wlan show profiles 2>&1 | Out-String)
+        $list = Resolve-WirelessProfileList $profText
+        if (-not $list.Understood) { throw $list.Error }
+        $wlanProfileListBasis = $list.Basis
+        foreach ($n in $list.Names) {
             $p = (& netsh wlan show profile name="$n" 2>&1 | Out-String)
             $onex = [bool]($p -match '(?im)802\.1X\s*:\s*Enabled')
-            $serverVal = $null
+            $eap = [pscustomobject]@{ ServerCertValidation=$null; ServerCertValidationBasis='Not an 802.1X profile.'; EapType=$null; TrustedRootCount=$null; ServerNamesPresent=$null }
             if ($onex) {
+                $xt = $null
                 try {
                     $tmp = Join-Path $env:TEMP ('pkwlan_' + [guid]::NewGuid().ToString('N'))
                     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
                     & netsh wlan export profile name="$n" folder="$tmp" | Out-Null   # no key=clear: no secret exported
                     $xf = Get-ChildItem -LiteralPath $tmp -Filter *.xml -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if ($xf) {
-                        $xt = Get-Content -LiteralPath $xf.FullName -Raw
-                        # PEAP and EAP-TTLS carry an explicit PerformServerValidation element; EAP-TLS carries a
-                        # ServerValidation block whose user-prompt flag and trusted-root list decide the behaviour.
-                        # Only an explicit value is recorded; anything else stays null (not determined).
-                        if ($xt -match '(?i)<PerformServerValidation>\s*(true|false)\s*</PerformServerValidation>') {
-                            $serverVal = ($Matches[1].ToLower() -eq 'true')
-                        } elseif ($xt -match '(?i)<ServerValidation>') {
-                            $noPrompt = ($xt -match '(?i)<DisableUserPromptForServerValidation>\s*true\s*</DisableUserPromptForServerValidation>')
-                            $hasRoot  = ($xt -match '(?i)<TrustedRootCA>\s*[0-9a-f ]{20,}')
-                            $serverVal = if ($noPrompt -and $hasRoot) { $true } elseif ($noPrompt -or $hasRoot) { $null } else { $false }
-                        } else { $serverVal = $null }
-                    }
+                    if ($xf) { $xt = Get-Content -LiteralPath $xf.FullName -Raw }
                     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-                } catch { $serverVal = $null }
+                } catch { $xt = $null }
+                $eap = Resolve-EapServerValidation $xt
             }
-            $wlanProfiles += [pscustomobject]@{ Name=$n; Authentication=(Get-NetshField $p 'Authentication');
+            $wlanProfiles += [pscustomobject]@{ Name=$n; ProfileScope='AllUser'; Authentication=(Get-NetshField $p 'Authentication');
                 Cipher=(Get-NetshField $p 'Cipher'); ConnectionMode=(Get-NetshField $p 'Connection mode');
-                Dot1X=$onex; ServerCertValidation=$serverVal }
+                Dot1X=$onex; ServerCertValidation=$eap.ServerCertValidation; ServerCertValidationBasis=$eap.ServerCertValidationBasis;
+                TrustedRootCount=$eap.TrustedRootCount; ServerNamesPresent=$eap.ServerNamesPresent }
         }
-    }
-} catch { $wlanPresent = $false; $wlanDetermined = $false }
+        $wlanProfilesStatus = 'Collected'
+    } catch { $wlanProfilesStatus = 'Error'; $wlanProfilesError = $_.Exception.Message; $wlanProfiles = @() }
+}
+} finally {
+    # End of the netsh wlan calls: restore the console encoding that was in force before.
+    if ($wlanUtf8Console -and $null -ne $prevConsoleEncoding) { try { [Console]::OutputEncoding = $prevConsoleEncoding } catch {} }
+}
 
 Capture 'wirelessadapters' @('netsh') {
-    if ($wlanPresent -and $wlanAdapter) { $wlanAdapter } else { }
+    if ($wlanPresence.Present -eq 1 -and $wlanAdapter) { $wlanAdapter } else { }
 } 'Wireless adapter capability from netsh wlan show drivers. HostedNetworkSupported=No means this built-in adapter cannot perform over-the-air (monitor/AP) testing.'
 Capture 'wirelessinterface' @('netsh') {
-    if ($wlanPresent -and $wlanIface) { $wlanIface } else { }
+    if ($wlanPresence.Present -eq 1 -and $wlanIface) { $wlanIface } else { }
 } 'Currently connected wireless network security (netsh wlan show interfaces). Absent when disconnected or no wireless adapter is present.'
 Capture 'wirelessprofiles' @('netsh') {
+    if ($wlanProfilesStatus -eq 'Error') { throw $wlanProfilesError }
     $wlanProfiles
-} 'Saved wireless profiles with their authentication, cipher, auto-connect mode and 802.1X flag. Pre-shared keys are never read or exported.'
+} 'Saved all-user wireless profiles (ProfileScope AllUser) with their authentication, cipher, auto-connect mode, 802.1X flag and the server-certificate validation read from the exported profile XML. Per-user profiles are not read. Pre-shared keys are never read or exported. Recorded as an Error when the profile list could not be enumerated or understood.'
 Capture 'wirelessposture' @('netsh') {
-    $open=@($wlanProfiles | Where-Object { ($_.Authentication -match 'Open') -or [string]::IsNullOrWhiteSpace($_.Authentication) })
-    $openAuto=@($open | Where-Object { $_.ConnectionMode -match 'auto' })
+    $openCounts = Resolve-OpenNetworkCounts $wlanProfiles
     $legacy=@($wlanProfiles | Where-Object { ($_.Authentication -match 'WPA-') -or ($_.Authentication -match 'WEP') -or ($_.Cipher -match 'WEP') })
     $tkip=@($wlanProfiles | Where-Object { $_.Cipher -match 'TKIP' })
-    $ent=@($wlanProfiles | Where-Object { $_.Dot1X })
-    $entNoVal=@($ent | Where-Object { $_.ServerCertValidation -ne $true })
+    $entCounts = Resolve-EnterpriseValidationCounts $wlanProfiles
     $psk=@($wlanProfiles | Where-Object { $_.Authentication -match 'Personal' })
-    $connOk=$null; $connPmf=$null
-    if ($wlanIface -and ($wlanIface.State -match '^\s*connected\s*$')) {
+    $connOk=$null; $connPmf=$null; $connPmfBasis=$null
+    if ($wlanIface -and (Test-WlanConnected $wlanIface.State)) {
         $connOk=[bool]($wlanIface.Authentication -match 'WPA2|WPA3')
-        # PMF present when WPA3/SAE or a SHA256 AKM (6/8) is negotiated; absent for classic WPA2-PSK (AKM 2); null if unknown.
-        # AKM suites that require management-frame protection: 5 (802.1X-SHA256), 6 (PSK-SHA256),
-        # 8 (SAE), 9 (FT-SAE), 11/12/13 (Suite B / FT-SHA384), 18 (OWE), 19/20 (FT-PSK-SHA384, PSK-SHA384).
-        # Suites 1 to 4 (802.1X, PSK, FT-802.1X, FT-PSK with SHA-1) do not. WPA3 text implies SAE or
-        # Suite B. When no AKM could be read, PMF stays null: not determined, never assumed.
-        if (($wlanIface.Authentication -match 'WPA3') -or ($wlanIface.AkmSuite -in @(5,6,8,9,11,12,13,18,19,20))) { $connPmf=$true }
-        elseif ($wlanIface.AkmSuite -in @(1,2,3,4)) { $connPmf=$false }
-        else { $connPmf=$null }
+        $pmf = Resolve-Pmf $wlanIface.AkmSuite
+        $connPmf = $pmf.Pmf; $connPmfBasis = $pmf.Basis
+    } elseif ($wlanIface) {
+        $connPmfBasis = 'The wireless interface is not associated (State is not "connected"), so no negotiated AKM suite exists to evaluate.'
+    } else {
+        $connPmfBasis = 'No wireless interface detail was read, so no negotiated AKM suite exists to evaluate.'
     }
     [pscustomobject]@{
-        WirelessPresent=if ($wlanDetermined) { [int]([bool]$wlanPresent) } else { $null }
+        WirelessPresent=$wlanPresence.Present
+        WirelessPresenceBasis=$wlanPresence.Basis
         ProfilesTotal=@($wlanProfiles).Count
-        OpenNetworkCount=$open.Count
-        OpenAutoConnectCount=$openAuto.Count
+        OpenNetworkCount=$openCounts.OpenNetworkCount
+        OpenAutoConnectCount=$openCounts.OpenAutoConnectCount
+        UnreadableProfileCount=$openCounts.UnreadableProfileCount
+        UnreadableProfileNames=@($openCounts.UnreadableProfileNames)
         LegacyEncryptionCount=$legacy.Count
         TkipCipherCount=$tkip.Count
-        EnterpriseNetworkCount=$ent.Count
-        EnterpriseNoServerValidationCount=$entNoVal.Count
+        EnterpriseNetworkCount=$entCounts.EnterpriseNetworkCount
+        EnterpriseNoServerValidationCount=$entCounts.EnterpriseNoServerValidationCount
+        EnterpriseServerValidationUnknownCount=$entCounts.EnterpriseServerValidationUnknownCount
         PskNetworkCount=$psk.Count
+        CorporatePskNetworkCount=(Get-CorporatePskCount $wlanProfiles $wlanCorporateSsids)
+        CorporateSsidSource=$wlanCorporateSsidSource
         ConnectedAuthWpa2OrBetter=$connOk
         ConnectedManagementFrameProtection=$connPmf
+        ConnectedPmfBasis=$connPmfBasis
     }
-} 'Aggregated host-side wireless posture used by the WLAN rules. WirelessPresent is 1 or 0 only when the netsh output was understood (English text); it is null when it was not, for example on another display language, and the wireless rules then record Unknown. Over-the-air, rogue-AP and evil-twin testing require a monitor-mode adapter and physical presence, and are a separate layer.'
+} 'Aggregated host-side wireless posture used by the WLAN rules. WirelessPresent is 1 when netsh reports an interface, 0 when netsh reports none and no 802.11 adapter is listed, and null otherwise (another display language, service not running, access denied); WirelessPresenceBasis states which. A null value makes the wireless rules record Unknown. A profile whose authentication could not be read is counted in UnreadableProfileCount, never as Open; when any profile is unreadable and none is known to be open, OpenNetworkCount and OpenAutoConnectCount are null. EnterpriseNoServerValidationCount is null when some 802.1X profile could not be classified and none is known to skip validation. CorporatePskNetworkCount is null when no corporate SSID list was supplied. ConnectedManagementFrameProtection is true only when the negotiated AKM suite mandates it and null otherwise. Over-the-air, rogue-AP and evil-twin testing require a monitor-mode adapter and physical presence, and are a separate layer.'
 
 $complete=@($records | Where-Object { $_.status -notin @('Collected','NotApplicable') }).Count -eq 0
 $coverage=if ($complete) {'Complete'} else {'Partial'}
@@ -888,7 +1305,7 @@ $result = [ordered]@{
     limitations=@('Lab version, not validated on the five target Windows platforms.',
       'Missing-patch and CVE determination is performed off-host from the recorded servicing level against vendor data; this collector makes no vulnerability claim itself.',
       'Directory evidence covers identity, policy, privileged group membership, trusts and applied policy objects. It does NOT perform attack-path analysis, expand nested group membership, or assess packet capture, application or cloud.',
-      'Wireless assessment is host-side 802.11 configuration only (saved profiles, encryption, auto-join, 802.1X server-certificate validation) parsed from netsh with English labels. It does NOT include over-the-air, rogue-AP, evil-twin or controller-side testing, which require a monitor-mode adapter and physical presence.',
+      'Wireless assessment is host-side 802.11 configuration only (saved all-user profiles, encryption, auto-join, 802.1X server-certificate validation) parsed from netsh with English labels; per-user profiles are not read. It does NOT include over-the-air, rogue-AP, evil-twin or controller-side testing, which require a monitor-mode adapter and physical presence.',
       'Collection can trigger normal OS, security and domain-resolution activity; not zero network traffic.',
       'MaxItems bounds retained rows, not all provider enumeration work. Run.ps1 bounds its wait, but cancellation/cleanup require Windows validation.',
       'Read-only target intent: evidence files and OS execution logs are expected side effects.')
