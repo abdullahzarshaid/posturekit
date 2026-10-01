@@ -437,4 +437,561 @@ class Build20260928Tests(unittest.TestCase):
         self.assertEqual(res['result'],'Not applicable')
 
 
+# ---------------------------------------------------------------------------
+# Build 2026-10-01: Greenbone report validation and scan completeness, wireless
+# controller/air classification defects, multi-batch metadata, ToFindings
+# review queue. Synthetic fixtures only; no network, no PowerShell.
+# ---------------------------------------------------------------------------
+_EXT=HERE.parent/'Extensions'
+_wai_spec=importlib.util.spec_from_file_location('wirelessairimport',_EXT/'WirelessAirImport.py')
+wai=importlib.util.module_from_spec(_wai_spec); _wai_spec.loader.exec_module(wai)
+_gbi_spec=importlib.util.spec_from_file_location('greenboneimport',_EXT/'GreenboneImport.py')
+gbi=importlib.util.module_from_spec(_gbi_spec); _gbi_spec.loader.exec_module(gbi)
+_tf_spec=importlib.util.spec_from_file_location('tofindings',_EXT/'ToFindings.py')
+tf=importlib.util.module_from_spec(_tf_spec); _tf_spec.loader.exec_module(tf)
+
+_GVM_HEAD=('<?xml version="1.0"?><report id="r1"><report id="r1"><scan_run_status>{status}</scan_run_status>'
+           '<task id="t1"><name>Lab scan</name><status>{status}</status><progress>{progress}</progress></task>'
+           '<scan_start>2026-10-01T08:00:00Z</scan_start><scan_end>{end}</scan_end>'
+           '<hosts><count>3</count></hosts><result_count><full>5</full><filtered>2</filtered></result_count>'
+           '<filters><term>apply_overrides=0 min_qod=70</term></filters><results>')
+_GVM_TAIL='</results></report></report>'
+_GVM_RESULT=('<result id="{rid}"><name>{name}</name><host>10.0.0.{n}<asset asset_id="x"/></host><port>445/tcp</port>'
+             '<nvt oid="1.3.6.1.4.1.25623.1.0.{n}"><cvss_base>7.5</cvss_base><refs><ref type="cve" id="CVE-2026-000{n}"/></refs></nvt>'
+             '<threat>{threat}</threat><severity>7.5</severity><qod><value>{qod}</value></qod></result>')
+
+def _gvm_xml(status='Done',progress='100',end='2026-10-01T09:00:00Z',results=None):
+    results=results if results is not None else [dict(rid='a',name='SMB Vuln',n=1,threat='High',qod='80')]
+    body=''.join(_GVM_RESULT.format(**r) for r in results)
+    return _GVM_HEAD.format(status=status,progress=progress,end=end)+body+_GVM_TAIL
+
+_AIRODUMP_HEADER=('BSSID, First time seen, Last time seen, channel, Speed, Privacy, Cipher, Authentication, Power, '
+                  '# beacons, # IV, LAN IP, ID-length, ESSID, Key\r\n')
+def _airodump_row(bssid,essid,privacy='WPA2',idlen=None):
+    idlen=len(essid) if idlen is None else idlen
+    return (f'{bssid}, 2026-10-01 08:00:00, 2026-10-01 08:05:00,  6,  54, {privacy}, CCMP, PSK, -40,  100,  0,'
+            f'   0.  0.  0.  0,  {idlen}, {essid}, \r\n')
+def _airodump_csv(rows):
+    return ('\r\n'+_AIRODUMP_HEADER+''.join(rows)+'\r\n'
+            'Station MAC, First time seen, Last time seen, Power, # packets, BSSID, Probed ESSIDs\r\n')
+
+
+class Build20261001Tests(unittest.TestCase):
+    def setUp(self): self.tmp=tempfile.TemporaryDirectory(); self.root=Path(self.tmp.name)
+    def tearDown(self): self.tmp.cleanup()
+    def _json(self,name,obj):
+        p=self.root/name; p.write_text(json.dumps(obj),encoding='utf-8'); return p
+    def _run(self,script,*argv):
+        return subprocess.run([sys.executable,str(_EXT/script)]+[str(x) for x in argv],capture_output=True,text=True)
+    def _greenbone(self,xml_text,name='r.xml'):
+        src=self.root/name; src.write_text(xml_text,encoding='utf-8'); out=self.root/(name+'.json')
+        c=self._run('GreenboneImport.py','--input',src,'--output',out,'--engagement','E','--source-position','VP')
+        return c,out
+
+    # -- GreenboneImport: defect 1, unrelated XML must not import as zero results --
+    def test_greenbone_unrelated_xml_rejected(self):
+        c,out=self._greenbone('<?xml version="1.0"?><nmaprun><host><result>x</result></host></nmaprun>')
+        self.assertEqual(c.returncode,2,c.stdout)
+        self.assertIn('Not a Greenbone/GVM report',c.stderr)
+        self.assertFalse(out.exists(),'no output may be written for a rejected document')
+    def test_greenbone_report_without_results_or_count_rejected(self):
+        c,out=self._greenbone('<?xml version="1.0"?><report id="r1"><task><name>x</name></task></report>')
+        self.assertEqual(c.returncode,2); self.assertFalse(out.exists())
+    def test_greenbone_get_reports_response_wrapper_accepted(self):
+        xml='<?xml version="1.0"?><get_reports_response status="200">'+_gvm_xml()+'</get_reports_response>'
+        xml=xml.replace('<?xml version="1.0"?><report','<report',1)
+        c,out=self._greenbone(xml)
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertEqual(d['result_count'],1)
+
+    # -- defect 2: scan completeness recorded; Running export flagged --
+    def test_greenbone_done_scan_records_status_fields(self):
+        c,out=self._greenbone(_gvm_xml())
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertTrue(d['scan_complete'])
+        self.assertEqual(d['scan_run_status'],'Done'); self.assertEqual(d['progress'],'100')
+        self.assertEqual(d['task_name'],'Lab scan'); self.assertEqual(d['hosts_count'],'3')
+        self.assertEqual(d['result_count_full'],'5'); self.assertEqual(d['result_count_filtered'],'2')
+        self.assertEqual(d['filter_text'],'apply_overrides=0 min_qod=70')
+        self.assertEqual(d['scan_start'],'2026-10-01T08:00:00Z'); self.assertEqual(d['scan_end'],'2026-10-01T09:00:00Z')
+        self.assertFalse(any('before the task completed' in l for l in d['limitations']))
+    def test_greenbone_running_scan_sets_scan_complete_false(self):
+        c,out=self._greenbone(_gvm_xml(status='Running',progress='42',end=''))
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertFalse(d['scan_complete']); self.assertEqual(d['scan_run_status'],'Running')
+        self.assertIsNone(d['scan_end'])
+        self.assertTrue(any(l=='scan export taken before the task completed; status Running at 42 percent' for l in d['limitations']),d['limitations'])
+
+    # -- defect 3: qod recorded; critical threat is actionable --
+    def test_greenbone_qod_recorded_and_critical_actionable(self):
+        rows=[dict(rid='a',name='One',n=1,threat='Critical',qod='97'),dict(rid='b',name='Two',n=2,threat='Log',qod='30')]
+        c,out=self._greenbone(_gvm_xml(results=rows))
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertEqual(d['observations'][0]['qod'],'97'); self.assertTrue(d['observations'][0]['actionable'])
+        self.assertEqual(d['observations'][1]['qod'],'30'); self.assertFalse(d['observations'][1]['actionable'])
+        self.assertEqual(d['observations'][0]['cves'],['CVE-2026-0001'])
+
+    # -- defect 4: credentialed indicator heuristic --
+    def test_greenbone_credentialed_indicator(self):
+        self.assertIsNone(gbi.credentialed_indicator(['SMB Vuln','Apache detection']))
+        self.assertTrue(gbi.credentialed_indicator(['SMB Log-In Possible','SMB Vuln']))
+        self.assertTrue(gbi.credentialed_indicator(['SSH Login Successful For Authenticated Checks']))
+        self.assertFalse(gbi.credentialed_indicator(['SSH Login Failed For Authenticated Checks']))
+        self.assertFalse(gbi.credentialed_indicator(['SMB Vuln','Could not log in to host']))
+        c,out=self._greenbone(_gvm_xml(results=[dict(rid='a',name='Nothing',n=1,threat='Log',qod='80')]))
+        d=json.loads(out.read_text(encoding='utf-8')); self.assertIsNone(d['credentialed_indicator'])
+        self.assertIn('Heuristic',d['credentialed_indicator_note'])
+
+    # -- defect 5: guest VLAN separation cannot pass when no corporate VLAN is known --
+    def test_controller_importer_records_corporate_vlans_known(self):
+        intake={'engagement_id':'E','site_id':'LAB','controller':{'rogue_detection_enabled':True,'wips_enabled':True},
+                'wlans':[{'ssid':'C','purpose':'corporate','security':'wpa2-enterprise','pmf':'required','vlan':None},
+                         {'ssid':'G','purpose':'guest','security':'open','pmf':'disabled','vlan':30,'client_isolation':True}]}
+        src=self._json('intake.json',intake); out=self.root/'ctrl.json'
+        c=self._run('WirelessControllerImport.py','--input',src,'--output',out,'--engagement','E')
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertFalse(d['corporate_vlans_known']); self.assertEqual(d['corporate_vlans'],[])
+        tests,_=a.import_wireless_controller(out,'E'); by={t['test_id']:t for t in tests}
+        self.assertEqual(by['CTRL.2.vlan']['result'],'Unknown')
+        self.assertEqual(by['CTRL.2.vlan']['technical_interpretation'],'no corporate VLAN is recorded, so separation cannot be determined')
+        intake['wlans'][0]['vlan']=10; src=self._json('intake2.json',intake); out2=self.root/'ctrl2.json'
+        self.assertEqual(self._run('WirelessControllerImport.py','--input',src,'--output',out2,'--engagement','E').returncode,0)
+        self.assertTrue(json.loads(out2.read_text(encoding='utf-8'))['corporate_vlans_known'])
+        by={t['test_id']:t['result'] for t in a.import_wireless_controller(out2,'E')[0]}
+        self.assertEqual(by['CTRL.2.vlan'],'Pass')
+    def test_controller_guest_vlan_unknown_when_corporate_unknown_in_analyze(self):
+        # Evidence predating the flag: an empty corporate list must not produce Pass either.
+        doc={'schema_version':'1.0','tool_version':a.VERSION,'evidence_kind':'WirelessControllerConfig','engagement_id':'E',
+             'controller':{'rogue_detection_enabled':True,'wips_enabled':True},'corporate_vlans':[],
+             'wlans':[{'ssid':'G','purpose':'guest','security':'wpa2-enterprise','pmf':'required','vlan':30,'client_isolation':True}]}
+        by={t['test_id']:t for t in a.import_wireless_controller(self._json('c.json',doc),'E')[0]}
+        self.assertEqual(by['CTRL.1.vlan']['result'],'Unknown')
+        self.assertNotIn('CTRL.1.guestsec',by)
+
+    # -- defect 6: guest WLAN on a shared key is recorded as an observation --
+    def test_controller_guest_psk_observation(self):
+        doc={'schema_version':'1.0','tool_version':a.VERSION,'evidence_kind':'WirelessControllerConfig','engagement_id':'E',
+             'controller':{'rogue_detection_enabled':True,'wips_enabled':True},'corporate_vlans':[10],'corporate_vlans_known':True,
+             'wlans':[{'ssid':'G1','purpose':'guest','security':'wpa2-psk','pmf':'required','vlan':30,'client_isolation':True},
+                      {'ssid':'G2','purpose':'guest','security':'wep','pmf':'disabled','vlan':31,'client_isolation':True},
+                      {'ssid':'G3','purpose':'guest','security':'open','pmf':'disabled','vlan':32,'client_isolation':True},
+                      {'ssid':'C','purpose':'corporate','security':'wpa2-psk','pmf':'required','vlan':10,'client_isolation':None}]}
+        by={t['test_id']:t for t in a.import_wireless_controller(self._json('c.json',doc),'E')[0]}
+        self.assertEqual(by['CTRL.1.guestsec']['result'],'Observation'); self.assertIn('shared key',by['CTRL.1.guestsec']['objective'])
+        self.assertEqual(by['CTRL.1.guestsec']['severity'],'Not assigned')
+        self.assertEqual(by['CTRL.2.guestsec']['result'],'Observation')
+        self.assertNotIn('CTRL.3.guestsec',by); self.assertNotIn('CTRL.4.guestsec',by)
+
+    # -- defect 7: WPS unknown without wash; null never fails --
+    def test_air_wps_null_without_wash_and_no_wps_fail(self):
+        csv_text=_airodump_csv([_airodump_row('AA:BB:CC:DD:EE:01','CORP')])
+        src=self.root/'air.csv'; src.write_bytes(csv_text.encode('utf-8'))   # bytes: keep airodump's CRLF intact on Windows
+        allow=self._json('allow.json',{'corporate_essids':['CORP'],'authorized_bssids':['AA:BB:CC:DD:EE:01']})
+        out=self.root/'air.json'
+        c=self._run('WirelessAirImport.py','--input',src,'--authorized',allow,'--output',out,'--engagement','E','--source-position','VP')
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertIsNone(d['wps_source']); self.assertIsNone(d['observations'][0]['wps_enabled'])
+        self.assertEqual(d['observations'][0]['classification'],'AuthorizedAP')
+        self.assertTrue(any('wash' in l for l in d['limitations']))
+        tests,_=a.import_wireless_air(out,'E')
+        self.assertEqual(tests[0]['result'],'Observation'); self.assertNotIn('WPS',tests[0]['objective'])
+        # with wash supplied, state is known and a listed BSSID fails
+        wash=self.root/'wash.txt'; wash.write_text('BSSID               Ch  dBm  WPS  Lck  Vendor    ESSID\nAA:BB:CC:DD:EE:01    6  -40  2.0  No   Acme      CORP\n',encoding='utf-8')
+        out2=self.root/'air2.json'
+        c=self._run('WirelessAirImport.py','--input',src,'--authorized',allow,'--wash',wash,'--output',out2,'--engagement','E','--source-position','VP')
+        self.assertEqual(c.returncode,0,c.stderr); d2=json.loads(out2.read_text(encoding='utf-8'))
+        self.assertEqual(d2['wps_source'],'wash'); self.assertTrue(d2['observations'][0]['wps_enabled'])
+        self.assertEqual(a.import_wireless_air(out2,'E')[0][0]['result'],'Fail')
+    def test_air_analyze_null_wps_never_fails(self):
+        doc={'schema_version':'1.0','tool_version':a.VERSION,'evidence_kind':'WirelessAirObservations','engagement_id':'E',
+             'observations':[{'essid':'CORP','classification':'AuthorizedAP','open':False,'corporate_essid':True,'wps_enabled':None}]}
+        self.assertEqual(a.import_wireless_air(self._json('w.json',doc),'E')[0][0]['result'],'Observation')
+
+    # -- defect 8: csv parsing keeps an ESSID that contains a comma in one column --
+    def test_air_essid_with_comma_parsed(self):
+        rows=wai.parse_airodump(_airodump_csv([
+            _airodump_row('AA:BB:CC:DD:EE:01','Cafe, Upstairs'),
+            _airodump_row('AA:BB:CC:DD:EE:02','"Quoted, Name"',idlen=12),
+            _airodump_row('AA:BB:CC:DD:EE:03','Plain')]))
+        self.assertEqual(len(rows),3)
+        self.assertEqual(rows[0]['ESSID'],'Cafe, Upstairs'); self.assertEqual(rows[0]['Privacy'],'WPA2'); self.assertEqual(rows[0]['Key'],'')
+        self.assertEqual(rows[1]['ESSID'],'Quoted, Name'); self.assertEqual(rows[1]['channel'],'6')
+        self.assertEqual(rows[2]['ESSID'],'Plain'); self.assertEqual(rows[2]['Power'],'-40')
+
+    # -- defect 9: hidden SSIDs include NUL-only and NUL-prefixed names --
+    def test_air_hidden_essid_rules(self):
+        self.assertTrue(wai.is_hidden_essid('')); self.assertTrue(wai.is_hidden_essid('\x00\x00\x00'))
+        self.assertTrue(wai.is_hidden_essid('\x00abc')); self.assertFalse(wai.is_hidden_essid('CORP'))
+        rows=wai.parse_airodump(_airodump_csv([_airodump_row('AA:BB:CC:DD:EE:01','\x00\x00\x00\x00',idlen=4)]))
+        self.assertEqual(rows[0]['ESSID'],'\x00\x00\x00\x00')
+        src=self.root/'air.csv'; src.write_bytes(_airodump_csv([_airodump_row('AA:BB:CC:DD:EE:01','\x00\x00\x00\x00',idlen=4)]).encode('utf-8'))
+        allow=self._json('allow.json',{'corporate_essids':['CORP'],'authorized_bssids':[]}); out=self.root/'air.json'
+        c=self._run('WirelessAirImport.py','--input',src,'--authorized',allow,'--output',out,'--engagement','E','--source-position','VP')
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        self.assertTrue(d['observations'][0]['hidden']); self.assertEqual(d['observations'][0]['classification'],'Hidden'); self.assertEqual(d['observations'][0]['essid'],'')
+
+    # -- defect 10: look-alike ESSID classified and failed; exact rogue keeps allowlist caveat --
+    def test_air_lookalike_essid_classified_and_fails(self):
+        self.assertEqual(wai.normalise_essid('Corp-WiFi_Guest '),'corpwifiguest')
+        src=self.root/'air.csv'
+        src.write_bytes(_airodump_csv([_airodump_row('AA:BB:CC:DD:EE:01','Corp WiFi'),_airodump_row('AA:BB:CC:DD:EE:02','corp_wifi'),
+                                       _airodump_row('AA:BB:CC:DD:EE:03','Corp WiFi'),_airodump_row('AA:BB:CC:DD:EE:04','Cafe')]).encode('utf-8'))
+        allow=self._json('allow.json',{'corporate_essids':['Corp WiFi'],'authorized_bssids':['AA:BB:CC:DD:EE:01']}); out=self.root/'air.json'
+        c=self._run('WirelessAirImport.py','--input',src,'--authorized',allow,'--output',out,'--engagement','E','--source-position','VP')
+        self.assertEqual(c.returncode,0,c.stderr); d=json.loads(out.read_text(encoding='utf-8'))
+        cls=[o['classification'] for o in d['observations']]
+        self.assertEqual(cls,['AuthorizedAP','LookalikeEssid','RogueOrEvilTwin','External'])
+        self.assertEqual(d['observations'][1]['lookalike_of'],'Corp WiFi'); self.assertFalse(d['observations'][1]['corporate_essid'])
+        self.assertIsNone(d['observations'][0]['lookalike_of'])
+        tests,_=a.import_wireless_air(out,'E')
+        self.assertEqual([t['result'] for t in tests],['Observation','Fail','Fail','Observation'])
+        self.assertEqual(tests[1]['objective'],"Access point broadcasting a look-alike of corporate ESSID 'corp_wifi'")
+        self.assertIn('allowlist must be complete and current',tests[2]['technical_interpretation'])
+
+    # -- defect 11: multi-batch metadata counts distinct enabled assets over all batches --
+    def _batch_dir(self,name,batch_id,targets,evidence_for=()):
+        d=self.root/name; d.mkdir()
+        scope={'schema_version':'1.0','engagement_id':'SYNTHETIC','approved_for_lab':True,
+               'targets':[{'asset_id':t,'site_id':'LAB','computer_name':t,'enabled':en} for t,en in targets]}
+        (d/'Scope.json').write_text(json.dumps(scope),encoding='utf-8')
+        batch={'schema_version':'1.0','tool_version':'0.6','evidence_kind':'CollectionBatch','batch_id':batch_id,'engagement_id':'SYNTHETIC',
+               'scope_sha256':a.sha256(d/'Scope.json'),'collector_sha256':'0'*64,'completed_utc':'2026-10-01T00:00:02+00:00','targets':[]}
+        for t,en in targets:
+            if t in evidence_for:
+                raw={'schema_version':'1.0','tool_version':'0.6','evidence_kind':'WindowsCollection','asset_id':t,'site_id':'LAB','engagement_id':'SYNTHETIC',
+                     'scope_sha256':batch['scope_sha256'],'collector_sha256':'0'*64,'collection_status':'Complete',
+                     'started_utc':'2026-10-01T00:00:00Z','completed_utc':'2026-10-01T00:00:01Z',
+                     'host':{'computer_name':t,'domain_role':2,'is_domain_controller':False},
+                     'sources':[source(i,status=('Error' if (t=='C' and i=='wdigest') else 'Collected')) for i in sorted(a.SOURCE_IDS)]}
+                (d/f'Host.{t}.json').write_text(json.dumps(raw),encoding='utf-8')
+                batch['targets'].append({'asset_id':t,'site_id':'LAB','computer_name':t,'status':'Complete','evidence_file':f'Host.{t}.json','evidence_sha256':a.sha256(d/f'Host.{t}.json')})
+            elif en:
+                batch['targets'].append({'asset_id':t,'site_id':'LAB','computer_name':t,'status':'NotAttempted','error':None})
+        (d/'Batch.json').write_text(json.dumps(batch),encoding='utf-8')
+        return d
+    def test_multi_batch_enabled_assets_is_distinct_union(self):
+        rules={'schema_version':'1.0','profile_id':'SYN','rules':[base_rule()]}
+        b1=self._batch_dir('b1','B1',[('A',True),('B',True)],evidence_for=('A',))
+        b2=self._batch_dir('b2','B2',[('B',True),('C',True),('D',False)],evidence_for=('C',))
+        _,_,m1,_=a.analyze_batch(b1,rules); self.assertEqual(m1['enabled_assets'],2)
+        assets,tests,meta,_=a.merge_batches([b1,b2],rules)
+        self.assertEqual(meta['enabled_assets'],3)              # A, B, C once each; D is disabled
+        self.assertEqual(meta['batch_ids'],['B1','B2']); self.assertEqual(meta['batches'],2); self.assertEqual(meta['batch_id'],'B1,B2')
+        self.assertEqual(sorted(x['asset_id'] for x in assets),['A','B','C','D'])
+        total=len(a.SOURCE_IDS)
+        self.assertEqual(meta['sources_collected_max'],total); self.assertEqual(meta['sources_collected_min'],total-1)
+        self.assertEqual(sorted(t['asset_id'] for t in tests),['A','C'])
+    def test_single_batch_meta_has_batch_fields_and_source_coverage(self):
+        rules={'schema_version':'1.0','profile_id':'SYN','rules':[base_rule()]}
+        b1=self._batch_dir('b1','B1',[('A',True),('B',True)])
+        _,_,meta,_=a.merge_batches([b1],rules)
+        self.assertEqual(meta['enabled_assets'],2); self.assertEqual(meta['batch_ids'],['B1']); self.assertEqual(meta['batches'],1)
+        self.assertEqual(meta['batch_id'],'B1'); self.assertIsNone(meta['sources_collected_min']); self.assertIsNone(meta['sources_collected_max'])
+
+    # -- defects 12 and 13: ToFindings review queue, review gaps, non-host assets and control refs --
+    def _tests_csv(self,rows):
+        d=self.root/'derived'; d.mkdir(exist_ok=True)
+        fields=['test_id','phase','category','site_id','asset_id','source_position','objective','method','control_refs','expected','observed','result',
+                'technical_interpretation','severity','validation','evidence_file','evidence_pointer','evidence_sha256','timestamp_utc','limitations','reference','manual_validation']
+        with (d/'Tests.csv').open('w',encoding='utf-8-sig',newline='') as f:
+            w=csv.DictWriter(f,fieldnames=fields,extrasaction='ignore'); w.writeheader()
+            for r in rows: w.writerow({k:r.get(k,'') for k in fields})
+        return d
+    def test_tofindings_review_queue_and_gaps(self):
+        rows=[
+            {'test_id':'HOST.A.SMB01','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'SMBv1','observed':'True','expected':'False','result':'Fail','control_refs':'Not mapped','evidence_file':'Host.A.json','evidence_sha256':'1'*64},
+            {'test_id':'HOST.A.SMB02','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'Signing','observed':'','result':'Unknown','evidence_file':'Host.A.json','evidence_sha256':'1'*64},
+            {'test_id':'HOST.A.RDP01','category':'rdp','asset_id':'A','site_id':'LAB','objective':'NLA','observed':'','result':'Error','evidence_file':'Host.A.json','evidence_sha256':'1'*64},
+            {'test_id':'HOST.B.SMB02','category':'smbserver','asset_id':'B','site_id':'LAB','objective':'Signing','observed':'','result':'Not tested','evidence_file':'Host.B.json','evidence_sha256':'2'*64},
+            {'test_id':'HOST.B.SMB01','category':'smbserver','asset_id':'B','site_id':'LAB','objective':'SMBv1','observed':'False','result':'Pass','evidence_file':'Host.B.json','evidence_sha256':'2'*64},
+            {'test_id':'VULN.00001','category':'network_vulnerability','asset_id':'','site_id':'LAB','source_position':'VP','objective':'SMB vuln on 10.0.0.1:445','observed':'{"x":1}','result':'Candidate','control_refs':'NIST SP 800-53 Rev 5 RA-5','evidence_file':'gb.json','evidence_sha256':'3'*64},
+            {'test_id':'VULN.00002','category':'network_vulnerability','asset_id':'','site_id':'LAB','source_position':'VP','objective':'Info','observed':'o'*300,'result':'Observation','evidence_file':'gb.json','evidence_sha256':'3'*64},
+            {'test_id':'NET.N1','category':'segmentation_reachability','asset_id':'','site_id':'LAB','source_position':'VP','objective':'Reach','observed':'{}','result':'Inconclusive','evidence_file':'n.json','evidence_sha256':'4'*64},
+            {'test_id':'AIR.00001','category':'wireless_air','asset_id':'','site_id':'','source_position':'3rd floor','objective':'AP seen','observed':'{}','result':'Observation','evidence_file':'air.json','evidence_sha256':'5'*64},
+            {'test_id':'CTRL.1.open','category':'wireless_controller','asset_id':'','site_id':'HQ','source_position':'export','objective':"WLAN 'G' is not an open network",'observed':'{"ssid":"G"}','result':'Fail','control_refs':'NIST SP 800-53 Rev 5 AC-18','evidence_file':'ctrl.json','evidence_sha256':'6'*64},
+        ]
+        derived=self._tests_csv(rows); out=self.root/'out'
+        c=self._run('ToFindings.py','--derived',derived,'--output',out,'--engagement-id','E')
+        self.assertEqual(c.returncode,0,c.stderr)
+        self.assertIn('Review queue     : 6',c.stdout); self.assertIn('Coverage gaps    : 3',c.stdout)
+        d=json.loads((out/'findings.json').read_text(encoding='utf-8'))
+        q={e['test_id']:e for e in d['review_queue']}
+        self.assertEqual(set(q),{'HOST.A.SMB02','HOST.A.RDP01','HOST.B.SMB02','VULN.00001','VULN.00002','NET.N1'})
+        self.assertEqual(d['counts']['review_queue'],6); self.assertEqual(d['counts']['coverage_gaps'],3); self.assertEqual(d['counts']['findings'],2)
+        self.assertEqual(q['VULN.00001']['result'],'Candidate'); self.assertEqual(q['VULN.00001']['asset_id'],'LAB')
+        self.assertEqual(q['VULN.00001']['evidence_sha256'],'3'*64); self.assertEqual(q['VULN.00001']['category'],'network_vulnerability')
+        self.assertLessEqual(len(q['VULN.00002']['observed']),160); self.assertTrue(q['VULN.00002']['observed'].endswith('...'))
+        self.assertNotIn('AIR.00001',q)                                   # plain observation outside the scanner category
+        gaps={(g['title'],tuple(g['affected_assets'])):g for g in d['coverage_gaps']}
+        ga=gaps[('Tests without a determination for this asset',('A',))]; gb=gaps[('Tests without a determination for this asset',('B',))]
+        self.assertIn('1 Unknown, 1 Error, 0 Not tested',ga['description']); self.assertIn('0 Unknown, 0 Error, 1 Not tested',gb['description'])
+        self.assertEqual(ga['kind'],'CoverageGap'); self.assertEqual(ga['status'],'Not tested')
+        gc=gaps[('Candidate results awaiting analyst disposition',())]; self.assertIn('1 Candidate rows in category network_vulnerability',gc['description'])
+        self.assertEqual(len({g['id'] for g in d['coverage_gaps']}),3)
+        # defect 13: the controller finding is anchored to its site and carries its control reference
+        by_rule={f['source_rule']:f for f in d['findings']}
+        self.assertEqual(by_rule['open']['affected_assets'],['HQ']); self.assertEqual(by_rule['open']['affected_asset_count'],1)
+        self.assertEqual(by_rule['open']['control_refs'],'NIST SP 800-53 Rev 5 AC-18')
+        self.assertEqual(by_rule['SMB01']['affected_assets'],['A']); self.assertEqual(by_rule['SMB01']['control_refs'],'Not mapped')
+    def test_tofindings_review_queue_empty_when_all_decided(self):
+        rows=[{'test_id':'HOST.A.SMB01','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'SMBv1','observed':'False','result':'Pass','evidence_file':'Host.A.json','evidence_sha256':'1'*64}]
+        self.assertEqual(tf._review_queue(rows),[]); self.assertEqual(tf._review_gaps(rows,1),[])
+    def test_tofindings_non_host_fallback_to_source_position(self):
+        rows=[{'test_id':'AIR.00002','category':'wireless_air','asset_id':'','site_id':'','source_position':'3rd floor','objective':'Rogue AP','observed':'{}','result':'Fail','control_refs':'NIST SP 800-53 Rev 5 AC-18','evidence_file':'air.json','evidence_sha256':'5'*64}]
+        f=tf._config_findings(rows)[0]
+        self.assertEqual(f['affected_assets'],['3rd floor']); self.assertEqual(f['control_refs'],'NIST SP 800-53 Rev 5 AC-18')
+
+
+# ---------------------------------------------------------------------------
+# Build 2026-10-01: PatchCheck.py (defects 1 to 10) and SoftwareCheck.py
+# (defects 11 to 14). Synthetic MSRC and host fixtures only; the end-to-end
+# runs use --offline against a seeded cache so nothing reaches the network.
+# ---------------------------------------------------------------------------
+def msrc_doc(products, vulns):
+    return {'ProductTree':{'FullProductName':[{'ProductID':k,'Value':v} for k,v in products.items()]},'Vulnerability':vulns}
+
+def vuln(cve, fixes, scores=None):
+    """fixes = [(product_id, fixed_build)]; scores = list of CVSSScoreSets entries."""
+    return {'CVE':cve,'Title':{'Value':cve},
+            'CVSSScoreSets':scores if scores is not None else [{'BaseScore':7.8,'Vector':'V','ProductID':[p for p,_ in fixes]}],
+            'Remediations':[{'ProductID':[p],'FixedBuild':fb,'Description':{'Value':'5031356'},'URL':'u','RestartRequired':{'Value':'Yes'}} for p,fb in fixes]}
+
+def host_doc(asset, caption, full_build, release='21H2', arch='64-bit', install='Server'):
+    return {'asset_id':asset,'host':{'computer_name':asset,'os_caption':caption,'display_version':release,'architecture':arch,'full_build':full_build},
+            'sources':[{'id':'patchlevel','status':'Collected','data':[{'InstallationType':install}]}]}
+
+SERVER_2022 = {'11923':'Windows Server 2022','12244':'Windows Server 2022, 23H2 Edition'}
+
+
+class Build20261001PatchCheckTests(unittest.TestCase):
+    """Defects 1 to 10 of the 1 October 2026 review of PatchCheck.py."""
+    H2022 = host_doc('A','Microsoft Windows Server 2022 Standard','10.0.20348.1000')
+
+    def assess(self, host, docs, kev_ids=set(), kev_available=True):
+        return pc.assess_host(host, docs, kev_ids, kev_available, 'B')
+
+    # 2. same-branch rule
+    def test_other_branch_fixedbuild_is_ignored(self):
+        doc = msrc_doc(SERVER_2022, [vuln('CVE-1',[('11923','10.0.25398.9999')])])
+        self.assertEqual(pc.missing_for_host(doc,'11923',(10,0,20348,1000)),[])
+        self.assertEqual(pc.branch_remediations(doc,'11923',(10,0,20348,1000)),(0,1))
+    def test_only_other_branch_fixes_yields_unknown_not_clean(self):
+        doc = msrc_doc(SERVER_2022, [vuln('CVE-1',[('11923','10.0.25398.9999')])])
+        r = self.assess(self.H2022, [('2026-Sep',doc)])
+        self.assertEqual(r['status'],'Unknown')
+        self.assertEqual(r['product_matched']['product_id'],'11923')
+        self.assertTrue(any('different servicing branch' in l for l in r['limitations']))
+    def test_same_branch_fix_still_found_next_to_other_branch(self):
+        doc = msrc_doc(SERVER_2022, [vuln('CVE-1',[('11923','10.0.25398.9999')]), vuln('CVE-2',[('11923','10.0.20348.2000')])])
+        r = self.assess(self.H2022, [('2026-Sep',doc)])
+        self.assertEqual(r['status'],'MissingUpdates')
+        self.assertEqual([f['cve'] for f in r['missing_updates']],['CVE-2'])
+
+    # 4. Server 2012 R2 compares on (CurrentBuild, UBR) only
+    def test_server_2012_r2_lower_ubr_is_missing(self):
+        doc = msrc_doc({'10483':'Windows Server 2012 R2'}, [vuln('CVE-1',[('10483','6.3.9600.22500')])])
+        self.assertEqual([f['cve'] for f in pc.missing_for_host(doc,'10483',(10,0,9600,22470))],['CVE-1'])
+    def test_server_2012_r2_higher_ubr_is_present(self):
+        doc = msrc_doc({'10483':'Windows Server 2012 R2'}, [vuln('CVE-1',[('10483','6.3.9600.22400')])])
+        self.assertEqual(pc.missing_for_host(doc,'10483',(10,0,9600,22470)),[])
+        self.assertEqual(pc.branch_remediations(doc,'10483',(10,0,9600,22470)),(1,0))
+    def test_server_2012_r2_end_to_end(self):
+        host = host_doc('R2','Microsoft Windows Server 2012 R2 Standard','10.0.9600.22470',release=None)
+        doc = msrc_doc({'10483':'Windows Server 2012 R2','10378':'Windows Server 2012'}, [vuln('CVE-1',[('10483','6.3.9600.22500'),('10378','6.2.9200.25000')])])
+        r = self.assess(host,[('2026-Sep',doc)])
+        self.assertEqual(r['product_matched']['product_id'],'10483')
+        self.assertEqual(r['status'],'MissingUpdates')
+        self.assertEqual(r['missing_updates'][0]['fixed_build'],'6.3.9600.22500')
+
+    # 3. server match uses display_version
+    def test_edition_only_candidate_is_not_selected(self):
+        m = pc.match_product({'12244':'Windows Server 2022, 23H2 Edition'},'Microsoft Windows Server 2022 Standard','21H2','64-bit','Server')
+        self.assertEqual(m,[])
+    def test_edition_matching_display_version_is_preferred(self):
+        m = pc.match_product(SERVER_2022,'Microsoft Windows Server 2022 Datacenter','23H2','64-bit','Server')
+        self.assertEqual(m[0][0],'12244')
+    def test_edition_not_matching_display_version_falls_to_base(self):
+        m = pc.match_product(SERVER_2022,'Microsoft Windows Server 2022 Datacenter','21H2','64-bit','Server')
+        self.assertEqual([p for p,_ in m],['11923'])
+    def test_r2_caption_prefers_r2_product_and_plain_caption_excludes_it(self):
+        names={'10483':'Windows Server 2012 R2','10378':'Windows Server 2012'}
+        self.assertEqual(pc.match_product(names,'Microsoft Windows Server 2012 R2 Standard',None,'64-bit','Server')[0][0],'10483')
+        self.assertEqual([p for p,_ in pc.match_product(names,'Microsoft Windows Server 2012 Standard',None,'64-bit','Server')],['10378'])
+    def test_unidentifiable_server_product_is_unknown(self):
+        doc = msrc_doc({'12244':'Windows Server 2022, 23H2 Edition'}, [vuln('CVE-1',[('12244','10.0.25398.9999')])])
+        r = self.assess(self.H2022,[('2026-Sep',doc)])
+        self.assertEqual(r['status'],'Unknown'); self.assertIsNone(r['product_matched'])
+        self.assertTrue(any('not be identified unambiguously' in l for l in r['limitations']))
+
+    # 5. product-specific CVSS
+    def test_cvss_from_product_specific_set(self):
+        scores=[{'BaseScore':5.5,'Vector':'OTHER','ProductID':['99999']},{'BaseScore':9.8,'Vector':'MINE','ProductID':['11923']}]
+        doc = msrc_doc(SERVER_2022,[vuln('CVE-1',[('11923','10.0.20348.2000')],scores)])
+        f = pc.missing_for_host(doc,'11923',(10,0,20348,1000))[0]
+        self.assertEqual((f['cvss_base_score'],f['cvss_vector'],f['cvss_source']),(9.8,'MINE','product'))
+    def test_cvss_first_set_only_when_no_set_names_a_product(self):
+        scores=[{'BaseScore':6.1,'Vector':'FIRST'},{'BaseScore':8.8,'Vector':'SECOND'}]
+        doc = msrc_doc(SERVER_2022,[vuln('CVE-1',[('11923','10.0.20348.2000')],scores)])
+        f = pc.missing_for_host(doc,'11923',(10,0,20348,1000))[0]
+        self.assertEqual((f['cvss_base_score'],f['cvss_source']),(6.1,'first_set'))
+    def test_cvss_none_when_sets_name_other_products_only(self):
+        scores=[{'BaseScore':5.5,'Vector':'OTHER','ProductID':['99999']}]
+        doc = msrc_doc(SERVER_2022,[vuln('CVE-1',[('11923','10.0.20348.2000')],scores)])
+        f = pc.missing_for_host(doc,'11923',(10,0,20348,1000))[0]
+        self.assertEqual((f['cvss_base_score'],f['cvss_source']),(None,'none'))
+
+    # 6. architecture spellings
+    def test_architecture_64_bit_capital_b(self):
+        m = pc.match_product(PRODUCTS,'Microsoft Windows 11 Home','25H2','64-Bit','Client')
+        self.assertEqual(m[0][1],'Windows 11 Version 25H2 for x64-based Systems')
+    def test_architecture_aliases(self):
+        for text,want in (('64 bits','x64'),('x64','x64'),('AMD64','x64'),('32-Bit','32-bit'),('x86','32-bit'),('arm64','ARM64'),('AArch64','ARM64'),('64-bit','x64')):
+            self.assertEqual(pc.normalise_arch(text),want,text)
+        self.assertEqual(pc.normalise_arch('Itanium'),'Itanium')
+        self.assertEqual(pc.match_product(PRODUCTS,'Microsoft Windows 11 Pro','24H2','arm 64','Client')[0][0],'20440')
+
+    # 7. KEV unavailable gives null
+    def test_kev_unavailable_gives_null_not_false(self):
+        doc = msrc_doc(SERVER_2022,[vuln('CVE-1',[('11923','10.0.20348.2000')])])
+        r = self.assess(self.H2022,[('2026-Sep',doc)],kev_ids=None,kev_available=False)
+        self.assertIsNone(r['missing_updates'][0]['known_exploited'])
+        self.assertEqual(r['counts']['known_exploited'],0)
+        self.assertTrue(any('known_exploited is null' in l for l in r['limitations']))
+    def test_kev_available_gives_bool(self):
+        doc = msrc_doc(SERVER_2022,[vuln('CVE-1',[('11923','10.0.20348.2000')]),vuln('CVE-2',[('11923','10.0.20348.2000')])])
+        r = self.assess(self.H2022,[('2026-Sep',doc)],kev_ids={'CVE-1'})
+        got={f['cve']:f['known_exploited'] for f in r['missing_updates']}
+        self.assertEqual(got,{'CVE-1':True,'CVE-2':False}); self.assertEqual(r['counts']['known_exploited'],1)
+
+    # 8. cache freshness
+    def test_cache_sidecar_written_and_stale_offline_flagged(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/'msrc_index.json'; p.write_text('{"value": []}',encoding='utf-8')
+            data,origin,fetched,stale=pc._cached(td,'msrc_index.json','http://invalid.test/',offline=True)
+            self.assertEqual((origin,stale),('cache',False)); self.assertTrue((Path(td)/'msrc_index.json.meta.json').is_file())
+            (Path(td)/'msrc_index.json.meta.json').write_text(json.dumps({'fetched_utc':'2026-07-01T00:00:00+00:00'}),encoding='utf-8')
+            data,origin,fetched,stale=pc._cached(td,'msrc_index.json','http://invalid.test/',offline=True)
+            self.assertTrue(stale); self.assertEqual(fetched.isoformat(),'2026-07-01T00:00:00+00:00')
+    def test_stale_cache_is_refetched_when_online(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/'msrc_index.json'; p.write_text('{"value": []}',encoding='utf-8')
+            (Path(td)/'msrc_index.json.meta.json').write_text(json.dumps({'fetched_utc':'2026-07-01T00:00:00+00:00'}),encoding='utf-8')
+            calls=[]; original=pc._fetch
+            pc._fetch=lambda url: (calls.append(url) or {'value':[{'ID':'2026-Sep'}]})
+            try: data,origin,fetched,stale=pc._cached(td,'msrc_index.json','http://x/',offline=False)
+            finally: pc._fetch=original
+            self.assertEqual((origin,stale,len(calls)),('network',False,1)); self.assertEqual(data['value'][0]['ID'],'2026-Sep')
+            self.assertLess(pc._age_days(fetched),1)
+
+    # 9. fetch failures are caught, never a traceback
+    def test_fetch_failure_raises_feed_unavailable(self):
+        import urllib.error as ue
+        original=pc._fetch
+        def boom(url): raise ue.URLError('no route')
+        pc._fetch=boom
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                with self.assertRaises(pc.FeedUnavailable) as cm: pc._cached(td,'msrc_index.json','http://x/',offline=False)
+                self.assertEqual(cm.exception.name,'msrc_index.json'); self.assertIn('URLError',cm.exception.reason)
+        finally: pc._fetch=original
+    def test_offline_without_cache_raises_feed_unavailable(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(pc.FeedUnavailable): pc._cached(td,'cisa_kev.json','http://x/',offline=True)
+
+    # 10. integrity gate + 1. every host (end to end, offline, seeded cache)
+    def _batch(self, td, hosts, tamper=None, ledger=True):
+        root=Path(td); targets=[]
+        for h in hosts:
+            name='Host.%s.json'%h['asset_id']; (root/name).write_text(json.dumps(h),encoding='utf-8')
+            targets.append({'asset_id':h['asset_id'],'computer_name':h['asset_id'],'status':'Complete','evidence_file':name,'evidence_sha256':a.sha256(root/name)})
+        if tamper: targets[0]['evidence_sha256']='1'*64
+        if ledger: (root/'Batch.json').write_text(json.dumps({'targets':targets}),encoding='utf-8')
+        return root
+    def _seed(self, td, doc):
+        cache=Path(td)/'cache'; cache.mkdir()
+        (cache/'msrc_index.json').write_text(json.dumps({'value':[{'ID':'2026-Sep'}]}),encoding='utf-8')
+        (cache/'msrc_2026-Sep.json').write_text(json.dumps(doc),encoding='utf-8')
+        (cache/'cisa_kev.json').write_text(json.dumps({'vulnerabilities':[{'cveID':'CVE-1'}]}),encoding='utf-8')
+        return cache
+    def _run(self, root, cache):
+        out=root/'out'
+        c=subprocess.run([sys.executable,str(HERE.parent/'Extensions'/'PatchCheck.py'),'--batch',str(root),'--output',str(out),'--cache',str(cache),'--offline'],capture_output=True,text=True)
+        self.assertNotIn('Traceback',c.stderr)
+        return c, json.loads((out/'MissingUpdates.json').read_text(encoding='utf-8'))
+    def test_digest_mismatch_is_evidence_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=self._batch(td,[self.H2022],tamper=True); cache=self._seed(td,msrc_doc(SERVER_2022,[vuln('CVE-1',[('11923','10.0.20348.2000')])]))
+            c,d=self._run(root,cache)
+            self.assertEqual(c.returncode,2); self.assertEqual(d['hosts'][0]['status'],'EvidenceRejected'); self.assertEqual(d['status'],'EvidenceRejected')
+            self.assertIn('digest mismatch',d['hosts'][0]['rejection_reason']); self.assertEqual(d['hosts'][0]['missing_updates'],[]); self.assertIsNone(d['hosts'][0]['product_matched'])
+    def test_missing_ledger_entry_is_evidence_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=self._batch(td,[self.H2022]); ledger=json.loads((root/'Batch.json').read_text()); ledger['targets']=[]; (root/'Batch.json').write_text(json.dumps(ledger),encoding='utf-8')
+            v=pc.verify_hosts(str(root)); self.assertEqual(len(v),1); self.assertIn('no ledger entry',v[0][2])
+    def test_missing_batch_json_rejects_every_host(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=self._batch(td,[self.H2022],ledger=False)
+            v=pc.verify_hosts(str(root)); self.assertIn('Batch.json is absent',v[0][2])
+    def test_two_host_batch_yields_two_entries(self):
+        h2=host_doc('B','Microsoft Windows Server 2022 Standard','10.0.20348.3000')
+        with tempfile.TemporaryDirectory() as td:
+            root=self._batch(td,[self.H2022,h2]); cache=self._seed(td,msrc_doc(SERVER_2022,[vuln('CVE-1',[('11923','10.0.20348.2000')])]))
+            c,d=self._run(root,cache)
+            self.assertEqual(c.returncode,1)
+            self.assertEqual([(h['asset_id'],h['status']) for h in d['hosts']],[('A','MissingUpdates'),('B','NoMissingUpdates')])
+            # first host mirrored at top level for existing consumers
+            self.assertEqual(d['asset_id'],'A'); self.assertEqual(d['status'],'MissingUpdates'); self.assertEqual(len(d['missing_updates']),1)
+            self.assertTrue(d['kev_available']); self.assertTrue(d['missing_updates'][0]['known_exploited'])
+            self.assertIsNotNone(d['feed_fetched_utc']); self.assertEqual(d['feed_age_days'],0)
+            self.assertIn('Host              : B',c.stdout)
+    def test_feed_failure_writes_unknown_and_exits_2(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=self._batch(td,[self.H2022]); cache=Path(td)/'cache'; cache.mkdir()   # empty cache + offline = unavailable
+            c,d=self._run(root,cache)
+            self.assertEqual(c.returncode,2); self.assertEqual(d['hosts'][0]['status'],'Unknown'); self.assertEqual(d['status'],'Unknown')
+            self.assertTrue(any('msrc_index.json could not be fetched' in l for l in d['hosts'][0]['limitations']))
+            self.assertIn('Vendor data unavailable',c.stdout); self.assertFalse(d['kev_available'])
+
+
+class Build20261001SoftwareCheckTests(unittest.TestCase):
+    """Defects 11 to 14 of the 1 October 2026 review of SoftwareCheck.py."""
+    def doc(self, asset, status='Collected', data=None, present=True):
+        d={'asset_id':asset,'host':{'computer_name':asset},'sources':[]}
+        if present: d['sources'].append({'id':'software','status':status,'data':[] if data is None else data})
+        return d
+    def test_error_status_is_unknown(self):
+        r=sc.assess_host(self.doc('A','Error',[{'Name':'Google Chrome','Version':'90.0','Publisher':'Google LLC'}]),set(),None,'B')
+        self.assertEqual(r['status'],'Unknown'); self.assertEqual(r['items'],[])
+        self.assertTrue(any('software inventory was not collected' in l for l in r['limitations']))
+    def test_absent_source_is_unknown(self):
+        r=sc.assess_host(self.doc('A',present=False),set(),None,'B')
+        self.assertEqual(r['status'],'Unknown'); self.assertTrue(any('software inventory was not collected' in l for l in r['limitations']))
+    def test_collected_empty_inventory_is_clean(self):
+        r=sc.assess_host(self.doc('A'),set(),None,'B')
+        self.assertEqual(r['status'],'NoRiskySoftwareFound'); self.assertEqual(r['counts']['inventory_size'],0)
+    def test_partial_status_adds_limitation(self):
+        r=sc.assess_host(self.doc('A','Partial',[]),set(),None,'B')
+        self.assertEqual(r['status'],'NoRiskySoftwareFound'); self.assertTrue(any('partially collected' in l for l in r['limitations']))
+    def test_quickbooks_and_thinkbook_not_excluded_kb_number_is(self):
+        self.assertFalse(sc._excluded('quickbooks desktop pro 2023')); self.assertFalse(sc._excluded('lenovo thinkbook utility'))
+        self.assertTrue(sc._excluded('security update for windows (kb5031356)')); self.assertTrue(sc._excluded('kb5031356'))
+        self.assertFalse(sc._excluded('kb123'))   # too short to be a KB article
+        self.assertTrue(sc._excluded('microsoft visual c++ 2019 x64 minimum runtime'))
+        self.assertFalse(sc._excluded('hotfixer pro'))   # word boundary
+        got={i['name']:i['risk_type'] for i in sc.assess([{'Name':'Lenovo ThinkBook Utility','Version':'1.0'},{'Name':'Update for Windows (KB5031356)','Version':'1'}],{'thinkbook'})}
+        self.assertEqual(got,{'Lenovo ThinkBook Utility':'KevProductPresent'})
+    def test_two_hosts_catalog_warning_and_unknown_top_level(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            (root/'Host.A.json').write_text(json.dumps(self.doc('A','Error')),encoding='utf-8')
+            (root/'Host.B.json').write_text(json.dumps(self.doc('B','Collected',[{'Name':'WinRAR 6.11 (64-bit)','Version':'6.11.0'}])),encoding='utf-8')
+            out=root/'out'
+            c=subprocess.run([sys.executable,str(HERE.parent/'Extensions'/'SoftwareCheck.py'),'--batch',str(root),'--output',str(out),'--no-kev'],capture_output=True,text=True)
+            self.assertNotIn('Traceback',c.stderr); self.assertEqual(c.returncode,1)
+            d=json.loads((out/'SoftwareRisk.json').read_text(encoding='utf-8'))
+            self.assertEqual([(h['asset_id'],h['status']) for h in d['hosts']],[('A','Unknown'),('B','RiskySoftware')])
+            self.assertEqual(d['status'],'Unknown'); self.assertEqual(d['asset_id'],'A')
+            self.assertIn('curated snapshot',d['catalog_warning']); self.assertEqual(d['hosts'][1]['items'][0]['risk_type'],'BelowVersionFloor')
+
+
 if __name__=='__main__': unittest.main()

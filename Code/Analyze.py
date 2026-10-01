@@ -421,7 +421,9 @@ def analyze_batch(batch_dir: Path, rule_doc: dict[str, Any]) -> tuple[list[dict[
                 complete = (entry['status'] == 'Complete' and raw['collection_status'] == 'Complete' and
                             REQUIRED_SOURCE_IDS.issubset(set(sources)) and all(s['status'] in ('Collected', 'NotApplicable') for s in sources.values()))
                 summary.update(status='Complete' if complete else 'Partial', evidence=path.name,
-                               note='Collection completeness refers only to this collector, not complete penetration-test coverage.')
+                               note='Collection completeness refers only to this collector, not complete penetration-test coverage.',
+                               sources_collected=sum(1 for s in sources.values() if s['status'] in ('Collected', 'NotApplicable')),
+                               sources_total=len(sources))
                 artifacts.append({'file': path.name, 'sha256': digest, 'kind': 'WindowsCollection', 'asset_id': asset_id})
                 for rule in rule_doc['rules']:
                     tests.append(evaluate_rule(rule, sources, asset_id, target['site_id'], path.name, digest, raw['completed_utc']))
@@ -435,9 +437,69 @@ def analyze_batch(batch_dir: Path, rule_doc: dict[str, Any]) -> tuple[list[dict[
         'scope_sha256': batch['scope_sha256'], 'collector_sha256': batch.get('collector_sha256'),
         'profile_id': rule_doc['profile_id'], 'rules_notice': rule_doc.get('notice', ''),
         'batch_completed': bool(batch.get('completed_utc')), 'enabled_assets': sum(t['enabled'] for t in targets),
+        'enabled_asset_ids': sorted(t['asset_id'] for t in targets if t['enabled']),
         'generated_utc': datetime.now(timezone.utc).isoformat(), 'tool_version': VERSION,
     }
     return assets, tests, meta, artifacts
+
+
+def merge_batches(batch_paths: list[Path], rules: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    """Analyze one or more sealed batches of the same engagement and merge them.
+
+    The first batch holding evidence for an asset is kept for that asset. Metadata
+    is assembled across every batch rather than copied from the first one: enabled
+    assets are the distinct enabled asset ids over all batches, batch_ids and
+    batches record what was merged, and sources_collected_min/max expose source
+    coverage apart from asset status.
+    """
+    tests: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    meta: dict[str, Any] | None = None
+    seen_assets: dict[str, dict[str, Any]] = {}
+    batch_ids: list[str] = []
+    enabled_ids: set[str] = set()
+    for batch_path in batch_paths:
+        b_assets, b_tests, b_meta, b_artifacts = analyze_batch(batch_path, rules)
+        if meta is None:
+            meta = b_meta
+        elif b_meta['engagement_id'] != meta['engagement_id']:
+            raise ValueError('All batches must belong to the same engagement.')
+        batch_ids.append(str(b_meta.get('batch_id')))
+        enabled_ids.update(b_meta.get('enabled_asset_ids') or [])
+        adopted: set[str] = set()
+        for summary in b_assets:
+            current = seen_assets.get(summary['asset_id'])
+            has_evidence = summary['status'] in ('Complete', 'Partial')
+            if current is None:
+                seen_assets[summary['asset_id']] = summary
+                if has_evidence:
+                    adopted.add(summary['asset_id'])
+            elif has_evidence and current['status'] not in ('Complete', 'Partial'):
+                seen_assets[summary['asset_id']] = summary
+                adopted.add(summary['asset_id'])
+            elif has_evidence:
+                current['note'] = (current.get('note') or '') + f" Later batch {b_meta.get('batch_id')} also holds evidence for this asset; the earlier batch was kept."
+        tests.extend(t for t in b_tests if t.get('asset_id') in adopted)
+        artifacts.extend(x for x in b_artifacts if x.get('asset_id') in adopted)
+    if meta is None:
+        raise ValueError('At least one batch is required.')
+    assets = list(seen_assets.values())
+    meta['enabled_assets'] = len(enabled_ids)
+    meta['batch_ids'] = batch_ids
+    meta['batches'] = len(batch_ids)
+    if len(batch_ids) > 1:
+        meta['batch_id'] = ','.join(batch_ids)
+    meta.update(source_coverage(assets))
+    return assets, tests, meta, artifacts
+
+
+def source_coverage(assets: list[dict[str, Any]]) -> dict[str, Any]:
+    """Minimum and maximum count of usable sources (Collected or NotApplicable) over the
+    assets that produced evidence, so source coverage is visible apart from asset status.
+    Both are None when no asset produced evidence."""
+    counts = [a['sources_collected'] for a in assets if type(a.get('sources_collected')) is int]
+    return {'sources_collected_min': min(counts) if counts else None,
+            'sources_collected_max': max(counts) if counts else None}
 
 
 def import_network(path: Path, engagement: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -644,11 +706,20 @@ def import_wireless_air(path: Path, engagement: str) -> tuple[list[dict[str, Any
         essid = o.get('essid') or '(hidden)'
         if cls == 'RogueOrEvilTwin':
             result, obj = 'Fail', f"Unauthorized access point broadcasting corporate ESSID '{essid}'"
-            interp = 'A radio broadcasting a corporate ESSID is not on the authorized-access-point list. This is a rogue or evil-twin candidate that can harvest credentials or bridge clients; confirm the BSSID against the authorized inventory.'
+            interp = ('A radio broadcasting a corporate ESSID is not on the authorized-access-point list. This is a rogue or evil-twin '
+                      'candidate that can harvest credentials or bridge clients. The authorized-BSSID allowlist must be complete and '
+                      'current before this is reported: confirm the BSSID against the client inventory first, because a missing '
+                      'legitimate radio produces exactly this result.')
+        elif cls == 'LookalikeEssid':
+            result, obj = 'Fail', f"Access point broadcasting a look-alike of corporate ESSID '{essid}'"
+            interp = ('The ESSID differs from a corporate ESSID only by case, spacing, hyphens or underscores. Such a name can be '
+                      'mistaken for the corporate network by users and is an evil-twin or phishing candidate; confirm the radio '
+                      'is not a client-owned variant before reporting.')
         elif o.get('open') and o.get('corporate_essid'):
             result, obj = 'Fail', f"Corporate ESSID '{essid}' observed with no encryption"
             interp = 'A corporate ESSID is being broadcast open (unencrypted). Traffic and association are unprotected.'
-        elif o.get('wps_enabled') and cls in ('AuthorizedAP',):
+        elif o.get('wps_enabled') is True and cls in ('AuthorizedAP',):
+            # wps_enabled is null when no wash listing was supplied; null is unknown, never a Fail.
             result, obj = 'Fail', f"WPS enabled on authorized access point for '{essid}'"
             interp = 'Wi-Fi Protected Setup is enabled and is subject to PIN brute-force; it should be disabled on corporate access points.'
         elif cls == 'Hidden':
@@ -685,6 +756,11 @@ def import_wireless_controller(path: Path, engagement: str) -> tuple[list[dict[s
     ts = str(doc.get('normalized_utc') or '')
     controller = doc.get('controller') or {}
     corp_vlans = set(doc.get('corporate_vlans') or [])
+    # Older evidence has no corporate_vlans_known flag; derive it from the list so an
+    # empty corporate set never lets a guest VLAN comparison pass by default.
+    corp_known = doc.get('corporate_vlans_known')
+    if type(corp_known) is not bool:
+        corp_known = bool(corp_vlans)
     wlans = doc.get('wlans')
     if not isinstance(wlans, list) or not wlans:
         raise ValueError('Wireless-controller evidence has no WLANs.')
@@ -721,13 +797,22 @@ def import_wireless_controller(path: Path, engagement: str) -> tuple[list[dict[s
             tests.append(rec(f'{base}.isolation', f"Guest WLAN '{ssid}' enforces client isolation",
                              'Pass' if iso is True else ('Fail' if iso is False else 'Unknown'), {'ssid': ssid, 'client_isolation': iso},
                              'Guest client isolation prevents guest devices reaching each other; absence enables lateral movement.'))
-            if isinstance(vlan, int):
+            if isinstance(vlan, int) and not corp_known:
+                tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' VLAN separation from corporate", 'Unknown',
+                                 {'ssid': ssid, 'vlan': vlan, 'corporate_vlans': sorted(corp_vlans), 'corporate_vlans_known': False},
+                                 'no corporate VLAN is recorded, so separation cannot be determined'))
+            elif isinstance(vlan, int):
                 tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' is on a VLAN separate from corporate",
                                  'Fail' if vlan in corp_vlans else 'Pass', {'ssid': ssid, 'vlan': vlan, 'corporate_vlans': sorted(corp_vlans)},
                                  'A guest SSID sharing a corporate VLAN bridges untrusted devices into the corporate segment.'))
             else:
                 tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' VLAN separation from corporate", 'Unknown',
                                  {'ssid': ssid, 'vlan': None}, 'No VLAN was recorded for this guest SSID, so separation cannot be determined.'))
+            if sec == 'wep' or 'psk' in sec or 'personal' in sec:
+                tests.append(rec(f'{base}.guestsec', f"Guest WLAN '{ssid}' uses a shared key ({sec})", 'Observation',
+                                 {'ssid': ssid, 'security': sec},
+                                 'The guest WLAN authenticates with a shared key. Recorded as an observation; the analyst assigns severity '
+                                 'after considering how the key is distributed, rotated and what the guest segment can reach.'))
         tests.append(rec(f'{base}.pmf', f"WLAN '{ssid}' requires management-frame protection (PMF)",
                          'Pass' if pmf == 'required' else ('Fail' if pmf == 'disabled' else 'Observation'),
                          {'ssid': ssid, 'pmf': pmf}, 'PMF (802.11w) resists deauthentication and management-frame spoofing; "optional" leaves legacy clients unprotected.'))
@@ -874,35 +959,7 @@ def main() -> int:
         if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
             raise ValueError('Output must be a new or empty directory; existing evidence is never overwritten.')
         rules = load_rules(args.rules)
-        assets, tests, meta, artifacts = [], [], None, []
-        seen_assets: dict[str, dict[str, Any]] = {}
-        batch_ids: list[str] = []
-        for batch_path in args.batch:
-            b_assets, b_tests, b_meta, b_artifacts = analyze_batch(batch_path, rules)
-            if meta is None:
-                meta = b_meta
-            elif b_meta['engagement_id'] != meta['engagement_id']:
-                raise ValueError('All batches must belong to the same engagement.')
-            batch_ids.append(str(b_meta.get('batch_id')))
-            adopted: set[str] = set()
-            for summary in b_assets:
-                current = seen_assets.get(summary['asset_id'])
-                has_evidence = summary['status'] in ('Complete', 'Partial')
-                if current is None:
-                    seen_assets[summary['asset_id']] = summary
-                    if has_evidence:
-                        adopted.add(summary['asset_id'])
-                elif has_evidence and current['status'] not in ('Complete', 'Partial'):
-                    seen_assets[summary['asset_id']] = summary
-                    adopted.add(summary['asset_id'])
-                elif has_evidence:
-                    current['note'] = (current.get('note') or '') + f" Later batch {b_meta.get('batch_id')} also holds evidence for this asset; the earlier batch was kept."
-            tests.extend(t for t in b_tests if t.get('asset_id') in adopted)
-            artifacts.extend(x for x in b_artifacts if x.get('asset_id') in adopted)
-        assets = list(seen_assets.values())
-        if len(batch_ids) > 1:
-            meta['batch_id'] = ','.join(batch_ids)
-            meta['batch_ids'] = batch_ids
+        assets, tests, meta, artifacts = merge_batches(args.batch, rules)
         meta['rules_sha256'] = sha256(args.rules)
         for path in args.network:
             new, artifact = import_network(path.resolve(), meta['engagement_id']); tests.extend(new); artifacts.append(artifact)

@@ -4,7 +4,7 @@
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Tests](https://img.shields.io/badge/tests-102%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-155%20passing-brightgreen.svg)
 ![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
 **Evidence-first, credentialed Windows and network security posture assessment.**

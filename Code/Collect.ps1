@@ -656,8 +656,12 @@ Capture 'gpoapplied' @('Get-ItemProperty') {
 Capture 'updatesource' @('Get-ItemProperty') {
     $wu = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
     $server = Get-RegValue $wu 'WUServer'
+    $useWu = Get-RegValue "$wu\AU" 'UseWUServer'
     [pscustomobject]@{
-        UseWUServer        = Get-RegValue "$wu\AU" 'UseWUServer'
+        UseWUServer        = $useWu
+        # 1 only when the policy both names a server and switches it on; otherwise the WUServer
+        # value is inert and the WSUS rules do not apply.
+        WsusInEffect       = if (($null -ne $useWu) -and ([int]$useWu -eq 1) -and $server) { 1 } else { 0 }
         WUServer           = [string]$server
         WUStatusServer     = [string](Get-RegValue $wu 'WUStatusServer')
         WUServerScheme     = if ($server -match '^(?i)(https?)://') { $Matches[1].ToLower() } else { $null }
@@ -800,7 +804,16 @@ try {
                     $xf = Get-ChildItem -LiteralPath $tmp -Filter *.xml -ErrorAction SilentlyContinue | Select-Object -First 1
                     if ($xf) {
                         $xt = Get-Content -LiteralPath $xf.FullName -Raw
-                        $serverVal = [bool](($xt -match 'ServerValidation') -and ($xt -match '(?i)DisableUserPromptForServerValidation>\s*true'))
+                        # PEAP and EAP-TTLS carry an explicit PerformServerValidation element; EAP-TLS carries a
+                        # ServerValidation block whose user-prompt flag and trusted-root list decide the behaviour.
+                        # Only an explicit value is recorded; anything else stays null (not determined).
+                        if ($xt -match '(?i)<PerformServerValidation>\s*(true|false)\s*</PerformServerValidation>') {
+                            $serverVal = ($Matches[1].ToLower() -eq 'true')
+                        } elseif ($xt -match '(?i)<ServerValidation>') {
+                            $noPrompt = ($xt -match '(?i)<DisableUserPromptForServerValidation>\s*true\s*</DisableUserPromptForServerValidation>')
+                            $hasRoot  = ($xt -match '(?i)<TrustedRootCA>\s*[0-9a-f ]{20,}')
+                            $serverVal = if ($noPrompt -and $hasRoot) { $true } elseif ($noPrompt -or $hasRoot) { $null } else { $false }
+                        } else { $serverVal = $null }
                     }
                     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
                 } catch { $serverVal = $null }
@@ -830,11 +843,16 @@ Capture 'wirelessposture' @('netsh') {
     $entNoVal=@($ent | Where-Object { $_.ServerCertValidation -ne $true })
     $psk=@($wlanProfiles | Where-Object { $_.Authentication -match 'Personal' })
     $connOk=$null; $connPmf=$null
-    if ($wlanIface -and ($wlanIface.State -match 'connected')) {
+    if ($wlanIface -and ($wlanIface.State -match '^\s*connected\s*$')) {
         $connOk=[bool]($wlanIface.Authentication -match 'WPA2|WPA3')
         # PMF present when WPA3/SAE or a SHA256 AKM (6/8) is negotiated; absent for classic WPA2-PSK (AKM 2); null if unknown.
-        if (($wlanIface.Authentication -match 'WPA3') -or ($wlanIface.AkmSuite -in @(6,8,9,18))) { $connPmf=$true }
-        elseif (($wlanIface.AkmSuite -eq 2) -or ($wlanIface.Authentication -match 'WPA2')) { $connPmf=$false }
+        # AKM suites that require management-frame protection: 5 (802.1X-SHA256), 6 (PSK-SHA256),
+        # 8 (SAE), 9 (FT-SAE), 11/12/13 (Suite B / FT-SHA384), 18 (OWE), 19/20 (FT-PSK-SHA384, PSK-SHA384).
+        # Suites 1 to 4 (802.1X, PSK, FT-802.1X, FT-PSK with SHA-1) do not. WPA3 text implies SAE or
+        # Suite B. When no AKM could be read, PMF stays null: not determined, never assumed.
+        if (($wlanIface.Authentication -match 'WPA3') -or ($wlanIface.AkmSuite -in @(5,6,8,9,11,12,13,18,19,20))) { $connPmf=$true }
+        elseif ($wlanIface.AkmSuite -in @(1,2,3,4)) { $connPmf=$false }
+        else { $connPmf=$null }
     }
     [pscustomobject]@{
         WirelessPresent=if ($wlanDetermined) { [int]([bool]$wlanPresent) } else { $null }

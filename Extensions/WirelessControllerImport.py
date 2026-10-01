@@ -79,11 +79,13 @@ def main() -> int:
             'input_file': args.input.name, 'input_sha256': sha256(args.input),
             'controller': {'rogue_detection_enabled': bool(controller['rogue_detection_enabled']),
                            'wips_enabled': bool(controller['wips_enabled'])},
-            'corporate_vlans': sorted(corp_vlans), 'wlans': norm,
+            'corporate_vlans': sorted(corp_vlans), 'corporate_vlans_known': bool(corp_vlans), 'wlans': norm,
             'limitations': ['Configuration review only; it does not prove runtime enforcement or that the export is current and complete.'],
         }
+        if not corp_vlans:
+            out['limitations'].append('No corporate WLAN carries an integer VLAN, so guest-to-corporate VLAN separation cannot be determined from this intake.')
         args.output.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding='utf-8')
-        print(f'Wrote {args.output} : {len(norm)} WLANs, corporate VLANs {sorted(corp_vlans)}')
+        print(f'Wrote {args.output} : {len(norm)} WLANs, corporate VLANs {sorted(corp_vlans)} (known={bool(corp_vlans)})')
         return 0
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         print(f'Import failed: {exc}', file=sys.stderr)

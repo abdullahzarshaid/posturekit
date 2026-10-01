@@ -82,11 +82,28 @@ FLOORS = [
 
 # Names that look like third-party software but are Microsoft OS / update content
 # handled elsewhere, or are not application software. Excluded to avoid noise.
-_EXCLUDE = (
-    "security update", "update for", "hotfix", "kb", "servicing stack",
-    "microsoft visual c++ 20",           # runtimes, handled by their own updates
-    "windows software development kit", "microsoft edge webview",
-)
+# Every pattern is anchored on word boundaries: the bare substring "kb" used
+# here before dropped "QuickBooks" and "ThinkBook" from the inventory.
+_EXCLUDE_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"\bkb\d{4,}\b",                     # KB5031356 (a KB article number)
+    r"\bsecurity update\b",
+    r"\bupdate for\b",
+    r"\bhotfix\b",
+    r"\bservicing stack\b",
+    r"\bmicrosoft visual c\+\+ 20\d\d\b",  # runtimes, handled by their own updates
+    r"\bwindows software development kit\b",
+    r"\bmicrosoft edge webview\b",
+))
+
+CATALOG_WARNING = (
+    "The bundled version floors and lifecycle facts are a curated snapshot dated "
+    "%s. They may be out of date; confirm each flagged item against the vendor's "
+    "current lifecycle and release information before it reaches a report."
+    % CATALOG_DATE)
+
+
+def _excluded(name):
+    return any(pattern.search(name) for pattern in _EXCLUDE_PATTERNS)
 
 
 def _read_json(path):
@@ -148,7 +165,7 @@ def assess(inventory, kev_products):
         version = entry.get("Version") or entry.get("version")
         publisher = entry.get("Publisher") or entry.get("publisher")
         name = _norm(raw_name)
-        if not name or any(x in name for x in _EXCLUDE):
+        if not name or _excluded(name):
             continue
         vt = parse_version(version)
 
@@ -256,33 +273,96 @@ def main():
                         help="skip the KEV product-presence overlay")
     arguments = parser.parse_args()
 
-    host_files = [n for n in os.listdir(arguments.batch) if n.startswith("Host.")]
+    host_files = sorted(n for n in os.listdir(arguments.batch)
+                        if n.startswith("Host.") and n.lower().endswith(".json"))
     if not host_files:
         raise SystemExit("No Host.*.json in %s. Nothing was collected from this "
                          "target." % arguments.batch)
-    host_document = _read_json(os.path.join(arguments.batch, host_files[0]))
-    host = host_document.get("host", {})
+    batch_name = os.path.basename(os.path.abspath(arguments.batch))
 
-    inventory = None
-    for source in host_document.get("sources", []):
-        if source.get("id") == "software":
-            if (source.get("status") or "").lower() not in ("collected", "ok", "complete", ""):
-                inventory = None
-            inventory = source.get("data")
-            break
+    kev_products = set() if arguments.no_kev else _kev_products(arguments.cache)
+    kev_limitation = None
+    if not kev_products and not arguments.no_kev:
+        kev_limitation = (
+            "No cached CISA KEV catalogue was available, so the product-presence overlay "
+            "was not applied. Run PatchCheck.py once with network access to populate it.")
 
     result = {
         "schema_version": "1.0",
         "evidence_kind": "SoftwareRiskAssessment",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
-        "asset_id": host_document.get("asset_id"),
-        "computer_name": host.get("computer_name"),
-        "source_batch": os.path.basename(os.path.abspath(arguments.batch)),
+        "source_batch": batch_name,
         "catalog_date": CATALOG_DATE,
+        "catalog_warning": CATALOG_WARNING,
         "method": ("Installed-software inventory (uninstall registry) compared against a "
                    "curated, dated lifecycle catalogue and reference version floors, plus an "
                    "advisory CISA KEV product-presence overlay. No CVE was matched to a "
                    "product/version, nothing was executed, and nothing was exploited."),
+        "status": None,
+        "hosts": [],
+    }
+    for name in host_files:
+        host_document = _read_json(os.path.join(arguments.batch, name))
+        result["hosts"].append(assess_host(host_document, kev_products, kev_limitation,
+                                           batch_name))
+
+    # The first host is mirrored at the top level for backward compatibility.
+    first = result["hosts"][0]
+    for key, value in first.items():
+        if key not in result:
+            result[key] = value
+    result["status"] = first["status"]
+
+    _write(arguments.output, result)
+    statuses = [h["status"] for h in result["hosts"]]
+    if "RiskySoftware" in statuses:
+        return 1
+    if "Unknown" in statuses:
+        return 2
+    return 0
+
+
+def software_inventory(host_document):
+    """(inventory_list_or_None, source_status, limitation_or_None).
+
+    The inventory is usable only when the software source reports Collected or
+    Partial and carries a list. An absent source, an Error/Unsupported status,
+    or a non-list payload yields None: the host is then Unknown, never clean.
+    """
+    found = None
+    for source in host_document.get("sources", []) or []:
+        if source.get("id") == "software":
+            found = source
+            break
+    if found is None:
+        return None, None, ("The software inventory was not collected on this host (no "
+                            "software source in the evidence), so third-party software "
+                            "could not be assessed. This is not evidence that the host "
+                            "carries no outdated software.")
+    status = (found.get("status") or "").strip()
+    data = found.get("data")
+    if status.lower() not in ("collected", "partial") or not isinstance(data, list):
+        return None, status, ("The software inventory was not collected on this host "
+                              "(source status %s), so third-party software could not be "
+                              "assessed. This is not evidence that the host carries no "
+                              "outdated software." % (status or "not recorded"))
+    if status.lower() == "partial":
+        return data, status, ("The software inventory was only partially collected "
+                              "(source status Partial), so software not in the returned "
+                              "subset was not assessed. An absent item is not evidence "
+                              "of its absence on the host.")
+    return data, status, None
+
+
+def assess_host(host_document, kev_products, kev_limitation, batch_name):
+    """Assess one host record. Returns the per-host result dict."""
+    host = host_document.get("host", {}) or {}
+    inventory, source_status, note = software_inventory(host_document)
+    result = {
+        "asset_id": host_document.get("asset_id"),
+        "computer_name": host.get("computer_name"),
+        "source_batch": batch_name,
+        "inventory_status": source_status,
         "status": None,
         "items": [],
         "counts": {},
@@ -300,18 +380,12 @@ def main():
 
     if inventory is None:
         result["status"] = "Unknown"
-        result["limitations"].insert(
-            0, "The software inventory source was not present or not collected on this host, "
-               "so third-party software could not be assessed. This is not evidence that the "
-               "host carries no outdated software.")
-        _write(arguments.output, result)
-        return 2
-
-    kev_products = set() if arguments.no_kev else _kev_products(arguments.cache)
-    if not kev_products and not arguments.no_kev:
-        result["limitations"].append(
-            "No cached CISA KEV catalogue was available, so the product-presence overlay "
-            "was not applied. Run PatchCheck.py once with network access to populate it.")
+        result["limitations"].insert(0, note)
+        return result
+    if note:
+        result["limitations"].insert(0, note)
+    if kev_limitation:
+        result["limitations"].append(kev_limitation)
 
     items = assess(inventory, kev_products)
     order = {"EndOfLife": 0, "BelowVersionFloor": 1, "KevProductPresent": 2, "VersionUnreadable": 3}
@@ -325,9 +399,9 @@ def main():
         "kev_product_present": sum(1 for i in items if i["risk_type"] == "KevProductPresent"),
         "version_unreadable": sum(1 for i in items if i["risk_type"] == "VersionUnreadable"),
     }
+    # NoRiskySoftwareFound is only ever stated for an inventory that was collected.
     result["status"] = "RiskySoftware" if items else "NoRiskySoftwareFound"
-    _write(arguments.output, result)
-    return 0 if not items else 1
+    return result
 
 
 def _write(output_dir, result):
@@ -335,14 +409,19 @@ def _write(output_dir, result):
     path = os.path.join(output_dir, "SoftwareRisk.json")
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=1)
-    counts = result.get("counts", {})
-    print("Status              : %s" % result["status"])
-    if counts:
-        print("Inventory / flagged : %d / %d" % (counts.get("inventory_size", 0),
-                                                  counts.get("flagged", 0)))
-        print("End-of-life         : %d" % counts.get("end_of_life", 0))
-        print("Below version floor : %d" % counts.get("below_floor", 0))
-        print("KEV product present : %d" % counts.get("kev_product_present", 0))
+    hosts = result.get("hosts") or [result]
+    for host in hosts:
+        counts = host.get("counts", {})
+        print("Host                : %s" % (host.get("computer_name") or host.get("asset_id")))
+        print("Status              : %s" % host["status"])
+        if counts:
+            print("Inventory / flagged : %d / %d" % (counts.get("inventory_size", 0),
+                                                      counts.get("flagged", 0)))
+            print("End-of-life         : %d" % counts.get("end_of_life", 0))
+            print("Below version floor : %d" % counts.get("below_floor", 0))
+            print("KEV product present : %d" % counts.get("kev_product_present", 0))
+        print("")
+    print("Catalogue           : %s" % result.get("catalog_warning"))
     print("Written             : %s" % path)
     print("Analyst review is required before any of this reaches a report.")
 

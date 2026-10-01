@@ -13,6 +13,17 @@ Found on a German-language Windows 11 host in the same lab.
 - PWD01 and PWD02 wording updated to match; no schema change.
 - LOG03 (PowerShell 7 script block logging) is gated on `PowerShellCoreInstalled` (now 0/1), so a host without PowerShell 7 records Not applicable instead of Unknown.
 
+### Independent review fixes (same day, 155 tests)
+- Collector: 802.1X server-certificate validation is read from `PerformServerValidation` (PEAP, TTLS) or the EAP-TLS `ServerValidation` block with a trusted root, never inferred from substrings; the connected state must equal "connected"; management-frame protection is decided from the negotiated AKM suite only (null when unknown); new `WsusInEffect` flag.
+- Rules: UPD01 and UPD02 gated on `WsusInEffect`; CRED02 absent value is Unknown (Windows 11 22H2 and later can enable LSA protection without the registry value).
+- PatchCheck: every host in the batch is assessed (`hosts` list); each host must match the evidence digest in Batch.json or is EvidenceRejected; fixed builds compared on the host's own servicing branch and UBR only (no more false cleans on Server 2012 R2 or Server 2022 23H2); an edition-only product variant is never selected by default; CVSS taken from the score set naming the matched product (`cvss_source`); architecture spelling normalised; `known_exploited` null when the CISA catalogue is unavailable; cached feed documents carry fetch times, are refreshed after 35 days, and the output records `feed_fetched_utc` and `feed_age_days`; fetch failures write Unknown and exit 2.
+- SoftwareCheck: an absent or errored inventory is Unknown, never clean; KB exclusion matches KB numbers only; every host assessed; `catalog_warning` added.
+- GreenboneImport: requires a GVM report root; records scan status, progress, start and end, task name, host and result counts, filter text and per-result QoD; `scan_complete` false with a limitation when the export predates completion; heuristic credentialed indicator.
+- Controller: guest VLAN separation is Unknown when no corporate VLAN is recorded; shared-key guest WLANs recorded as observations.
+- Wireless air: `wps_enabled` null without a wash listing; CSV parsing tolerates commas; null-byte hidden SSIDs; look-alike corporate ESSIDs classified and failed; rogue interpretation requires a complete allowlist.
+- Analyze: multi-batch metadata reports the distinct enabled assets, batch ids and per-asset source coverage.
+- ToFindings: `review_queue` of every undetermined or candidate row, coverage gaps per asset and category, per-host patch and software blocks, non-host findings carry their site and control references.
+
 ### Collector, wireless presence
 - `WirelessPresent` is now tri-state: 1 or 0 only when the `netsh wlan` text was understood (English), null otherwise (another display language, an unexpected message). The eight WLAN rules then record Unknown instead of a false "no wireless adapter".
 

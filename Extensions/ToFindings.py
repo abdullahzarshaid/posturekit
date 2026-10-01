@@ -134,7 +134,13 @@ def _config_findings(rows):
     for index, (rule_id, hits) in enumerate(sorted(by_rule.items()), start=1):
         first = hits[0]
         assets = sorted({h.get("asset_id") for h in hits if h.get("asset_id")})
+        if not assets and not (first.get("test_id") or "").startswith("HOST."):
+            # A network, wireless or scanner row carries no asset_id. Anchor the finding
+            # to the site or the source position so it is never asset-less.
+            assets = sorted({(h.get("site_id") or h.get("source_position") or "")
+                             for h in hits} - {""})
         observed = sorted({(h.get("observed") or "absent") for h in hits})
+        control_refs = sorted({(h.get("control_refs") or "") for h in hits} - {""})
         findings.append({
             "id": "CFG-%02d" % index,
             "source_rule": rule_id,
@@ -149,6 +155,7 @@ def _config_findings(rows):
             "cwe": CWE_BY_RULE.get(rule_id),
             "affected_assets": assets,
             "affected_asset_count": len(assets),
+            "control_refs": "; ".join(control_refs) if control_refs else None,
             "description": first.get("objective"),
             "observed_result": "Observed value: %s. Expected: %s."
                                % (", ".join(observed), first.get("expected") or "see rule"),
@@ -174,6 +181,112 @@ def _config_findings(rows):
             "validation": first.get("validation"),
         })
     return findings
+
+
+REVIEW_RESULTS = ("Candidate", "Inconclusive", "Unknown", "Error", "Not tested")
+UNRESOLVED_RESULTS = ("Unknown", "Error", "Not tested")
+
+
+def _needs_review(row):
+    """A row the analyst must disposition before the register is complete.
+
+    Candidate, Inconclusive, Unknown, Error and Not tested rows never become
+    findings on their own, and an Observation in the network_vulnerability
+    category is a scanner result awaiting confirmation. Dropping any of them
+    silently would read as 'nothing wrong'.
+    """
+    result = row.get("result")
+    if result in REVIEW_RESULTS:
+        return True
+    return result == "Observation" and row.get("category") == "network_vulnerability"
+
+
+def _review_queue(rows):
+    queue = []
+    for row in rows:
+        if not _needs_review(row):
+            continue
+        observed = row.get("observed")
+        observed = "" if observed is None else str(observed)
+        if len(observed) > 160:
+            observed = observed[:157] + "..."
+        queue.append({
+            "test_id": row.get("test_id"),
+            "category": row.get("category"),
+            "asset_id": row.get("asset_id") or row.get("site_id") or row.get("source_position") or "",
+            "result": row.get("result"),
+            "objective": row.get("objective"),
+            "observed": observed,
+            "evidence_file": row.get("evidence_file"),
+            "evidence_sha256": row.get("evidence_sha256"),
+        })
+    return queue
+
+
+def _review_gaps(rows, start_index):
+    """Coverage gaps summarising rows that are not yet dispositioned.
+
+    One gap per asset counting its Unknown, Error and Not tested rows, and one
+    gap per category counting Candidate rows awaiting disposition. Same shape as
+    the patch and software gaps so a consumer handles them identically.
+    """
+    unresolved = {}
+    candidates = {}
+    for row in rows:
+        result = row.get("result")
+        if result in UNRESOLVED_RESULTS:
+            key = row.get("asset_id") or row.get("site_id") or row.get("source_position") or "(no asset)"
+            unresolved.setdefault(key, {"Unknown": 0, "Error": 0, "Not tested": 0})
+            unresolved[key][result] += 1
+        elif result == "Candidate":
+            key = row.get("category") or "(no category)"
+            candidates[key] = candidates.get(key, 0) + 1
+
+    gaps = []
+    index = start_index
+    for asset, counts in sorted(unresolved.items()):
+        total = sum(counts.values())
+        gaps.append({
+            "id": "GAP-RV-%02d" % index,
+            "kind": "CoverageGap",
+            "title": "Tests without a determination for this asset",
+            "severity": "Not assessed",
+            "status": "Not tested",
+            "affected_assets": [asset],
+            "description": (
+                "%d test rows for this asset ended without a determination: %d Unknown, "
+                "%d Error, %d Not tested."
+                % (total, counts["Unknown"], counts["Error"], counts["Not tested"])),
+            "observed_result": "No determination made for the listed rows.",
+            "impact": ("These checks are UNASSESSED for this asset. The absence of a finding "
+                       "is not evidence that the control is in place."),
+            "remediation": ("Re-collect the missing source, or assess each listed row by another "
+                            "method and record the result in the review queue."),
+            "limitations": "Counts are taken from the rule results; see review_queue for the rows.",
+            "method": "Rule results that did not reach Pass or Fail.",
+            "validation": "Not determined.",
+        })
+        index += 1
+    for category, count in sorted(candidates.items()):
+        gaps.append({
+            "id": "GAP-RV-%02d" % index,
+            "kind": "CoverageGap",
+            "title": "Candidate results awaiting analyst disposition",
+            "severity": "Not assessed",
+            "status": "Not tested",
+            "affected_assets": [],
+            "description": ("%d Candidate rows in category %s await confirmation or rejection by "
+                            "an analyst." % (count, category)),
+            "observed_result": "Candidate rows are not findings until confirmed.",
+            "impact": ("Until each candidate is dispositioned the register neither confirms nor "
+                       "excludes the exposure it describes."),
+            "remediation": "Confirm or reject each candidate against raw evidence and manual testing.",
+            "limitations": "Counts are taken from the rule results; see review_queue for the rows.",
+            "method": "Imported candidate results (scanner or update applicability).",
+            "validation": "Not determined.",
+        })
+        index += 1
+    return gaps
 
 
 def _coverage_gap(patch):
@@ -384,23 +497,42 @@ def main():
     findings = _config_findings(rows)
 
     coverage_gaps = []
+    # Both engines now assess every host in the batch and list them under "hosts";
+    # older outputs carry one host at the top level. Every host is read: an
+    # undetermined or rejected host becomes a coverage gap, never silence.
     if arguments.patch and os.path.isfile(arguments.patch):
         patch = _read_json(arguments.patch)
-        if patch.get("status") == "Unknown":
-            coverage_gaps.append(_coverage_gap(patch))
-        else:
-            entry = _patch_finding(patch, 1)
-            if entry:
-                findings.insert(0, entry)
+        patch_hosts = patch.get("hosts") or [patch]
+        inserted = 0
+        for host_index, host_block in enumerate(patch_hosts, 1):
+            if host_block.get("status") in ("Unknown", "EvidenceRejected"):
+                gap = _coverage_gap(host_block)
+                gap["id"] = "GAP-PT-%02d" % host_index
+                if host_block.get("status") == "EvidenceRejected":
+                    gap["title"] = "Patch state not assessed: host evidence rejected"
+                    gap["limitations"] = str(host_block.get("rejection_reason") or gap.get("limitations"))
+                coverage_gaps.append(gap)
+            else:
+                entry = _patch_finding(host_block, host_index)
+                if entry:
+                    findings.insert(inserted, entry)
+                    inserted += 1
 
     if arguments.software and os.path.isfile(arguments.software):
         software = _read_json(arguments.software)
-        if software.get("status") == "Unknown":
-            coverage_gaps.append(_software_gap(software))
-        else:
-            sw_entry = _software_finding(software, 1)
-            if sw_entry:
-                findings.append(sw_entry)
+        software_hosts = software.get("hosts") or [software]
+        for host_index, host_block in enumerate(software_hosts, 1):
+            if host_block.get("status") == "Unknown":
+                gap = _software_gap(host_block)
+                gap["id"] = "GAP-SW-%02d" % host_index
+                coverage_gaps.append(gap)
+            else:
+                sw_entry = _software_finding(host_block, host_index)
+                if sw_entry:
+                    findings.append(sw_entry)
+
+    review_queue = _review_queue(rows)
+    coverage_gaps.extend(_review_gaps(rows, len(coverage_gaps) + 1))
 
     needs_analyst = sum(
         1 for f in findings
@@ -422,10 +554,12 @@ def main():
         "counts": {
             "findings": len(findings),
             "coverage_gaps": len(coverage_gaps),
+            "review_queue": len(review_queue),
             "fields_awaiting_analyst": needs_analyst,
         },
         "findings": findings,
         "coverage_gaps": coverage_gaps,
+        "review_queue": review_queue,
     }
 
     os.makedirs(arguments.output, exist_ok=True)
@@ -441,6 +575,8 @@ def main():
     if coverage_gaps:
         print("Coverage gaps    : %d  - these hosts are UNASSESSED, not clean."
               % len(coverage_gaps))
+    print("Review queue     : %d rows awaiting analyst disposition (Candidate, Unknown, Error, "
+          "Not tested, Inconclusive, scanner observations)" % len(review_queue))
     print("Fields awaiting analyst completion: %d" % needs_analyst)
     print("Written          : %s" % path)
     return 0

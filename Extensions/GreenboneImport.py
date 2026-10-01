@@ -16,7 +16,15 @@ from pathlib import Path
 
 VERSION = '0.6'
 MAX_XML = 100 * 1024 * 1024
-THREATS = {'high', 'medium', 'low', 'log', 'false positive', 'alarm', 'debug', ''}
+THREATS = {'critical', 'high', 'medium', 'low', 'log', 'false positive', 'alarm', 'debug', ''}
+ACTIONABLE_THREATS = ('critical', 'high', 'medium', 'low', 'alarm')
+
+# Heuristic only. Greenbone has no single "credentialed" flag in the report XML, so the
+# importer looks for the well-known login-status NVT names. A match sets the indicator;
+# no match leaves it null (unknown). The analyst confirms from the task's credential
+# configuration before relying on it.
+CREDENTIALED_SUCCESS_MARKERS = ('smb log-in', 'smb login', 'ssh login', 'ssh log-in', 'login successful', 'log-in successful')
+CREDENTIALED_FAILURE_MARKERS = ('login failed', 'log-in failed', 'could not log in', 'could not login', 'authentication failed')
 
 
 def sha256(path: Path) -> str:
@@ -28,8 +36,69 @@ def sha256(path: Path) -> str:
 
 
 def _text(el, tag):
+    if el is None:
+        return ''
     c = el.find(tag)
     return (c.text or '').strip() if c is not None and c.text else ''
+
+
+def locate_report(root):
+    """Return the <report> element or raise if the document is not a GVM report.
+
+    Accepts a bare <report> root or a <get_reports_response> wrapping one. GVM exports
+    often nest a second <report> inside the outer one; the innermost report that holds
+    <results> or <result_count> is used. Any other document is rejected so that an
+    unrelated XML file can never yield a successful zero-result import.
+    """
+    tag = (root.tag or '').split('}')[-1]
+    if tag == 'get_reports_response':
+        candidate = root.find('report')
+    elif tag == 'report':
+        candidate = root
+    else:
+        raise ValueError(f'Not a Greenbone/GVM report: root element is <{tag}>, expected <report> or <get_reports_response>.')
+    if candidate is None:
+        raise ValueError('Not a Greenbone/GVM report: <get_reports_response> holds no <report>.')
+    inner = candidate.find('report')
+    if inner is not None and (inner.find('results') is not None or inner.find('result_count') is not None):
+        candidate = inner
+    if candidate.find('results') is None and candidate.find('result_count') is None:
+        raise ValueError('Not a Greenbone/GVM report: no <results> or <result_count> under <report>.')
+    return candidate
+
+
+def scan_status(report, task):
+    """Scan completeness fields, read from report/scan_run_status or task/status."""
+    status = _text(report, 'scan_run_status') or _text(task, 'status')
+    progress = _text(task, 'progress') or _text(report, 'task/progress')
+    return {
+        'scan_run_status': status or None,
+        'scan_start': _text(report, 'scan_start') or None,
+        'scan_end': _text(report, 'scan_end') or None,
+        'progress': progress or None,
+        'task_name': _text(task, 'name') or None,
+        'hosts_count': _text(report, 'hosts/count') or None,
+        'result_count_full': _text(report, 'result_count/full') or None,
+        'result_count_filtered': _text(report, 'result_count/filtered') or None,
+        'filter_text': _text(report, 'filters/term') or None,
+    }
+
+
+def credentialed_indicator(names):
+    """Heuristic: true if a login-success NVT is present, false if a login-failure NVT is
+    present (and no success), null when neither appears. Documented as heuristic."""
+    success = failure = False
+    for name in names:
+        low = (name or '').lower()
+        if any(m in low for m in CREDENTIALED_FAILURE_MARKERS):
+            failure = True
+        elif any(m in low for m in CREDENTIALED_SUCCESS_MARKERS):
+            success = True
+    if success:
+        return True
+    if failure:
+        return False
+    return None
 
 
 def main() -> int:
@@ -48,8 +117,11 @@ def main() -> int:
         if args.input.stat().st_size > MAX_XML:
             raise ValueError('Report XML exceeds the 100 MiB lab limit.')
         root = ET.parse(args.input).getroot()
-        # results can sit at report/results/result or anywhere under the document
-        results = root.findall('.//results/result') or root.findall('.//result')
+        report = locate_report(root)
+        task = report.find('task')
+        status = scan_status(report, task)
+        # results sit at report/results/result; fall back to any <result> under the report
+        results = report.findall('results/result') or report.findall('.//results/result') or report.findall('.//result')
         if len(results) > 200000:
             raise ValueError('Unreasonable result count.')
         obs = []
@@ -77,29 +149,45 @@ def main() -> int:
             tl = threat.lower()
             if tl not in THREATS:
                 tl = ''
-            obs.append({
+            qod = _text(r, 'qod/value')
+            record = {
                 'host': host, 'port': port, 'name': name, 'threat': threat,
                 'severity_cvss': severity or cvss, 'nvt_oid': oid,
                 'cves': sorted(set(cves)),
-                'actionable': tl in ('high', 'medium', 'low', 'alarm'),
-            })
+                'actionable': tl in ACTIONABLE_THREATS,
+            }
+            if qod:
+                record['qod'] = qod
+            obs.append(record)
+        limitations = [
+            'Network vulnerability scanner output from one scanning position; an open detection is not a confirmed exploited vulnerability.',
+            'Greenbone/GVM feed currency and scan configuration determine coverage; false positives and false negatives are possible.',
+            'No exploitation was performed and the scanner severity is not adopted as assessor-assigned severity.',
+        ]
+        scan_complete = True
+        if status['scan_run_status'] is not None and status['scan_run_status'].strip().lower() != 'done':
+            scan_complete = False
+            limitations.append('scan export taken before the task completed; status %s at %s percent'
+                               % (status['scan_run_status'], status['progress'] if status['progress'] is not None else 'unknown'))
         doc = {
             'schema_version': '1.0', 'tool_version': VERSION, 'evidence_kind': 'GreenboneObservations',
             'engagement_id': args.engagement, 'source_site_id': args.source_site,
             'source_position': args.source_position, 'completed_utc': datetime.now(timezone.utc).isoformat(),
             'input_file': args.input.name, 'input_sha256': sha256(args.input),
+            'scan_complete': scan_complete,
+            'credentialed_indicator': credentialed_indicator([o['name'] for o in obs]),
+            'credentialed_indicator_note': ('Heuristic: derived from login-status NVT names in the results (true = a login-success '
+                                            'NVT is present, false = a login-failure NVT is present, null = neither). Confirm '
+                                            'against the task credential configuration before relying on it.'),
             'result_count': len(obs), 'observations': obs,
-            'limitations': [
-                'Network vulnerability scanner output from one scanning position; an open detection is not a confirmed exploited vulnerability.',
-                'Greenbone/GVM feed currency and scan configuration determine coverage; false positives and false negatives are possible.',
-                'No exploitation was performed and the scanner severity is not adopted as assessor-assigned severity.',
-            ],
+            'limitations': limitations,
         }
+        doc.update(status)
         args.output.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding='utf-8')
         by = {}
         for o in obs:
             by[o['threat'] or 'None'] = by.get(o['threat'] or 'None', 0) + 1
-        print(f'Wrote {args.output} : {len(obs)} results {by}')
+        print(f'Wrote {args.output} : {len(obs)} results {by} scan_run_status={status["scan_run_status"]} scan_complete={scan_complete}')
         return 0
     except (ValueError, OSError, ET.ParseError) as exc:
         print(f'Import failed: {exc}', file=sys.stderr)

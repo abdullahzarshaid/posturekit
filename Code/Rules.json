@@ -238,10 +238,10 @@
         2
       ],
       "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
-      "applicability": "RunAsPPL 1 and 2 both enable LSA protection; 2 is the form without the UEFI variable lock, available on Windows 11 22H2 and later. Either value satisfies this check.",
+      "applicability": "RunAsPPL 1 and 2 both enable LSA protection; 2 is the form without the UEFI variable lock, available on Windows 11 22H2 and later. Either value satisfies this check. VERSION DEPENDENT: an absent value is an unprotected state on Windows 10 and Windows Server, but Windows 11 22H2 and later may enable protection by default without the value.",
       "absent_means": {
-        "result": "Fail",
-        "interpretation": "No LSA protection value is configured, so LSASS is not running as a protected process and its memory is exposed to credential theft tooling."
+        "result": "Unknown",
+        "interpretation": "No RunAsPPL value is configured. On Windows 11 version 22H2 and later, new installations enable LSA protection by default without writing this value, and the effective state is recorded by the WinInit event 12 at boot, so the registry alone does not determine it. Confirm from the event log or Windows Security before reporting."
       },
       "phase": "host_configuration",
       "control_refs": [
@@ -679,7 +679,7 @@
       "type": "string",
       "expected": "https",
       "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
-      "applicability": "Only meaningful when UseWUServer is 1. An update server reached over http allows an attacker on the network path to supply content that installs with SYSTEM privileges. Confirm UseWUServer before reporting.",
+      "applicability": "Only meaningful when UseWUServer is 1. An update server reached over http allows an attacker on the network path to supply content that installs with SYSTEM privileges. Confirm UseWUServer before reporting. Gated on WsusInEffect: the rule applies only when UseWUServer is 1 and a server is named; a stale WUServer value with UseWUServer 0 is inert and records Not applicable.",
       "absent_means": {
         "result": "Not applicable",
         "interpretation": "No update server is configured, so the host uses Microsoft Update directly and this check does not apply."
@@ -696,7 +696,12 @@
           "control_title": "Transmission Confidentiality and Integrity"
         }
       ],
-      "phase": "host_configuration"
+      "phase": "host_configuration",
+      "gate": {
+        "field": "WsusInEffect",
+        "enabled": 1,
+        "disabled": 0
+      }
     },
     {
       "id": "UPD02",
@@ -707,7 +712,7 @@
       "type": "int",
       "expected": 0,
       "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
-      "applicability": "Disabling enterprise certificate pinning for update detection reverses a Microsoft hardening measure.",
+      "applicability": "Disabling enterprise certificate pinning for update detection reverses a Microsoft hardening measure. Gated on WsusInEffect: the rule applies only when UseWUServer is 1 and a server is named; a stale WUServer value with UseWUServer 0 is inert and records Not applicable.",
       "absent_means": {
         "result": "Pass",
         "interpretation": "No policy is configured, so certificate pinning remains at its default enabled state."
@@ -719,7 +724,12 @@
           "control_title": "Transmission Confidentiality and Integrity"
         }
       ],
-      "phase": "host_configuration"
+      "phase": "host_configuration",
+      "gate": {
+        "field": "WsusInEffect",
+        "enabled": 1,
+        "disabled": 0
+      }
     },
     {
       "id": "PRN01",
