@@ -71,9 +71,12 @@ hash, the method, and the outcome.
 
 Windows 10, Windows 11, Server 2016, Server 2019 and Server 2022 (member and domain controller) in a
 six-machine virtual lab, including central collection over WinRM with Kerberos from one admin host to
-four servers in a single run. The remaining items need equipment or a real environment rather than code:
-over-the-air wireless capture, a real controller export, a live Greenbone scan and a non-English host.
-See [CHANGELOG.md](CHANGELOG.md) for what the lab found and what changed.
+four servers in a single run, a live Greenbone Community Edition scan of the server segment imported and
+analyzed, a TP-Link Omada software controller's WLAN configuration reviewed through the controller
+importer, and a German-language Windows 11 client. The items that still need equipment or a real
+environment rather than code: over-the-air wireless capture, a real client controller export, and
+two-vantage segmentation across real network segments. See [CHANGELOG.md](CHANGELOG.md) for what the
+lab found and what changed.
 
 ## Requirements
 

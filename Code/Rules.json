@@ -602,10 +602,10 @@
       "type": "numeric_min",
       "expected": 14,
       "basis": "CIS Microsoft Windows Benchmark reference; confirm the applicable benchmark level with the client",
-      "applicability": "Local accounts only; domain policy is not represented in this evidence. The value is parsed from English-language output, so on a non-English host this check must be treated as not tested.",
+      "applicability": "Local accounts only; domain policy is not represented in this evidence. The value is read through the NetUserModalsGet API, so it does not depend on the display language; it is Unknown only if that call and the net accounts fallback both failed.",
       "absent_means": {
         "result": "Unknown",
-        "interpretation": "The policy value could not be read, most likely because the host is not English-language. No determination is made."
+        "interpretation": "The policy value could not be read. No determination is made."
       },
       "phase": "host_configuration",
       "control_refs": [

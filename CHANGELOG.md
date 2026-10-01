@@ -2,6 +2,16 @@
 
 All notable changes to PostureKit. The schema version of the evidence files is unchanged (1.0), so batches collected with earlier 0.6 builds still analyze.
 
+## 0.6, build 2026-10-01
+
+Found on a German-language Windows 11 host in the same lab.
+
+### Collector (`Code/Collect.ps1`)
+- The local account password and lockout policy (`passwordpolicy`) was parsed from the `net accounts` text, so on any non-English display language every value was null and the two account-policy rules recorded Unknown. The collector now reads the policy through the `NetUserModalsGet` API, the same source `net accounts` prints from: integer values, no language dependency, no elevation required. Password ages are recorded in days, lockout values in minutes, and -1 means never. Two fields were added, `LockoutDurationMinutes` and `LockoutWindowMinutes`. The text parse remains as the fallback only and now maps the English words Never and None to 0 and Unlimited to -1, so a lockout threshold shown as "Never" is recorded as 0 (a Fail) instead of Unknown.
+
+### Rules (`Code/Rules.json`, still 45 rules)
+- PWD01 and PWD02 wording updated to match; no schema change.
+
 ## 0.6, build 2026-09-29
 
 Fixes found by running the tool in a six-machine virtual lab (Windows 10, Windows 11, Server 2016, Server 2019, Server 2022 and a domain controller). Each fix carries a regression test; the suite is now 102 tests.

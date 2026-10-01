@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 PostureKit | version 0.6
 Read-only Windows evidence collector. No remediation, downloads, remote discovery,
@@ -28,6 +28,17 @@ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
 }
 $start = [DateTime]::UtcNow.ToString('o')
 $records = New-Object 'System.Collections.Generic.List[object]'
+
+function ConvertTo-PolicyNumber {
+    # net accounts fallback only: the English words it prints for the edge values.
+    param([string]$Text)
+    switch -Regex ($Text) {
+        '^\d+$'        { return [int]$Text }
+        '^(Never|None)$' { return 0 }
+        '^Unlimited$'  { return -1 }
+        default        { return $Text }
+    }
+}
 
 function Capture {
     param([string]$Id, [string[]]$Commands, [scriptblock]$Read, [string]$Note = '')
@@ -324,22 +335,73 @@ Capture 'laps' @('Get-ItemProperty') {
     [pscustomobject]@{ ConfiguredRoots = @($found); AnyLapsConfigured = [bool]($found.Count -gt 0) }
 } 'Local Administrator Password Solution configuration presence, checked across the Windows LAPS and legacy AdmPwd registry roots. Presence of a root is not proof the policy is applied.'
 
-Capture 'passwordpolicy' @('Get-CimInstance') {
-    $d = Get-CimInstance -ClassName Win32_AccountUsingSecuritySettings -ErrorAction SilentlyContinue
+Capture 'passwordpolicy' @('net') {
     $out = [ordered]@{ MinimumPasswordLength=$null; MaximumPasswordAge=$null; MinimumPasswordAge=$null
-                       PasswordHistoryLength=$null; LockoutThreshold=$null; Source='net accounts' }
+                       PasswordHistoryLength=$null; LockoutThreshold=$null; LockoutDurationMinutes=$null
+                       LockoutWindowMinutes=$null; Source=$null }
+    # Preferred path: the NetUserModalsGet API, which is what net accounts itself prints from.
+    # The values are integers, so nothing depends on the display language, and no elevation is
+    # needed. Ages arrive in seconds and are recorded in days (password ages) or minutes (lockout)
+    # to match the net accounts presentation. 0xFFFFFFFF means never and is recorded as -1.
     try {
-        $na = & "$env:SystemRoot\System32\net.exe" accounts 2>$null
-        foreach ($line in $na) {
-            if ($line -match '^\s*Minimum password length\s*:\s*(\S+)')  { $out.MinimumPasswordLength = $Matches[1] }
-            if ($line -match '^\s*Maximum password age.*:\s*(\S+)')      { $out.MaximumPasswordAge    = $Matches[1] }
-            if ($line -match '^\s*Minimum password age.*:\s*(\S+)')      { $out.MinimumPasswordAge    = $Matches[1] }
-            if ($line -match '^\s*Length of password history.*:\s*(\S+)'){ $out.PasswordHistoryLength = $Matches[1] }
-            if ($line -match '^\s*Lockout threshold\s*:\s*(\S+)')        { $out.LockoutThreshold      = $Matches[1] }
+        if (-not ('UserModalsReader' -as [type])) {
+            Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class UserModalsReader {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct USER_MODALS_INFO_0 { public uint min_passwd_len; public uint max_passwd_age; public uint min_passwd_age; public uint force_logoff; public uint password_hist_len; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct USER_MODALS_INFO_3 { public uint lockout_duration; public uint lockout_observation_window; public uint lockout_threshold; }
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int NetUserModalsGet(string server, int level, out IntPtr buffer);
+    [DllImport("netapi32.dll")]
+    static extern int NetApiBufferFree(IntPtr buffer);
+    public static long[] Read() {
+        IntPtr b;
+        int r = NetUserModalsGet(null, 0, out b);
+        if (r != 0) { throw new Exception("NetUserModalsGet level 0 returned " + r); }
+        USER_MODALS_INFO_0 m0 = (USER_MODALS_INFO_0)Marshal.PtrToStructure(b, typeof(USER_MODALS_INFO_0));
+        NetApiBufferFree(b);
+        r = NetUserModalsGet(null, 3, out b);
+        if (r != 0) { throw new Exception("NetUserModalsGet level 3 returned " + r); }
+        USER_MODALS_INFO_3 m3 = (USER_MODALS_INFO_3)Marshal.PtrToStructure(b, typeof(USER_MODALS_INFO_3));
+        NetApiBufferFree(b);
+        return new long[] { m0.min_passwd_len, m0.max_passwd_age, m0.min_passwd_age, m0.password_hist_len, m3.lockout_threshold, m3.lockout_duration, m3.lockout_observation_window };
+    }
+}
+'@
         }
-    } catch {}
+        $m = [UserModalsReader]::Read()
+        $never = [int64][uint32]::MaxValue
+        $out.MinimumPasswordLength  = [int]$m[0]
+        $out.MaximumPasswordAge     = if ($m[1] -eq $never) { -1 } else { [int][math]::Floor($m[1] / 86400) }
+        $out.MinimumPasswordAge     = [int][math]::Floor($m[2] / 86400)
+        $out.PasswordHistoryLength  = [int]$m[3]
+        $out.LockoutThreshold       = [int]$m[4]
+        $out.LockoutDurationMinutes = if ($m[5] -eq $never) { -1 } else { [int][math]::Floor($m[5] / 60) }
+        $out.LockoutWindowMinutes   = [int][math]::Floor($m[6] / 60)
+        $out.Source = 'NetUserModalsGet'
+    } catch { $out.Source = $null }
+    if (-not $out.Source) {
+        # Fallback only: parse the net accounts text. English labels only; on any other display
+        # language the values stay null and the analyzer records Unknown, never a value.
+        try {
+            $na = & "$env:SystemRoot\System32\net.exe" accounts 2>$null
+            foreach ($line in $na) {
+                if ($line -match '^\s*Minimum password length\s*:\s*(\S+)')  { $out.MinimumPasswordLength = ConvertTo-PolicyNumber $Matches[1] }
+                if ($line -match '^\s*Maximum password age.*:\s*(\S+)')      { $out.MaximumPasswordAge    = ConvertTo-PolicyNumber $Matches[1] }
+                if ($line -match '^\s*Minimum password age.*:\s*(\S+)')      { $out.MinimumPasswordAge    = ConvertTo-PolicyNumber $Matches[1] }
+                if ($line -match '^\s*Length of password history.*:\s*(\S+)'){ $out.PasswordHistoryLength = ConvertTo-PolicyNumber $Matches[1] }
+                if ($line -match '^\s*Lockout threshold\s*:\s*(\S+)')        { $out.LockoutThreshold      = ConvertTo-PolicyNumber $Matches[1] }
+                if ($line -match '^\s*Lockout duration.*:\s*(\S+)')          { $out.LockoutDurationMinutes= ConvertTo-PolicyNumber $Matches[1] }
+                if ($line -match '^\s*Lockout observation window.*:\s*(\S+)'){ $out.LockoutWindowMinutes  = ConvertTo-PolicyNumber $Matches[1] }
+            }
+            $out.Source = 'net accounts'
+        } catch {}
+    }
     [pscustomobject]$out
-} 'Local account password policy. Parsed from the built-in net accounts output, so the field labels are English-locale dependent; on a non-English host these values may be null and must not be read as a finding. Domain policy is not represented here.'
+} 'Local account password and lockout policy read through the NetUserModalsGet API, the same source net accounts prints from, so the values are integers and do not depend on the display language. Password ages are days, lockout values minutes, -1 means never. If the API call fails the net accounts text is parsed instead, and only English labels are understood there. Domain policy is not represented here.'
 
 Capture 'bootintegrity' @('Get-CimInstance') {
     $sb = $null
