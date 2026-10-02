@@ -1118,7 +1118,7 @@
       "expected": 0,
       "absent_means": {
         "result": "Unknown",
-        "interpretation": "No corporate SSID list was supplied for this engagement, so a saved pre-shared-key profile cannot be attributed to corporate policy; the total PSK profile count is recorded as an observation in the evidence."
+        "interpretation": "Either no corporate SSID list was supplied for this engagement, so a saved pre-shared-key profile cannot be attributed to corporate policy, or the saved profile inventory could not be enumerated or read in full (see ProfileInventoryStatus and ProfileInventoryBasis in the wirelessposture evidence); the total PSK profile count, when available, is recorded as an observation in the evidence."
       },
       "gate": {
         "field": "WirelessPresent",

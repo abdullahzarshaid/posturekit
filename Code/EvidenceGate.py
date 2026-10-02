@@ -16,6 +16,12 @@ produced a Host file. A target the collector never reached is reported as
 NotAttempted with the ledger's own error, so no downstream module can present
 silence as a clean result.
 
+validate_host_document() is the second half of the contract: once a Host file's
+digest matches the ledger, every consumer checks that the document really is
+the host the ledger says it is (schema, engagement, asset, site, computer name,
+scope and collector lineage). A digest only proves the file is unchanged since
+sealing; it does not prove the file belongs to this asset or this engagement.
+
 Python 3.10+ standard library only. Nothing is executed, nothing is fetched.
 """
 from __future__ import annotations
@@ -137,6 +143,56 @@ def _host_entry(batch_dir: Path, target: dict[str, Any], entry: dict[str, Any] |
         return host
     host.update(status=status, digest_ok=True)
     return host
+
+
+def validate_host_document(raw: Any, target: dict[str, Any], batch: dict[str, Any]) -> list[str]:
+    """Identity checks for one WindowsCollection host document.
+
+    raw is the parsed Host file, target the approved scope entry the ledger
+    claims it for, batch the parsed Batch.json. Returns the list of
+    contradictions, empty when the document is what the ledger says it is:
+
+      * schema_version 1.0, tool_version of this contract, evidence_kind
+        WindowsCollection;
+      * engagement_id equal to the batch's;
+      * asset_id and site_id equal to the ledger target's;
+      * host.computer_name equal to the target's, case-insensitively;
+      * scope_sha256 equal to the batch's;
+      * collector_sha256 equal to the collector_sha256 the batch recorded.
+
+    The collector check is lineage WITHIN the batch: the document must have been
+    written by the collector the batch was sealed with. It is deliberately not
+    compared with the Collect.ps1 shipped in the current release, so a batch
+    collected by an earlier release still verifies and reports its own
+    collector version.
+    """
+    if not isinstance(raw, dict):
+        return ["host document is not a JSON object"]
+    reasons: list[str] = []
+    if raw.get("schema_version") != "1.0":
+        reasons.append("schema_version %r is not 1.0" % (raw.get("schema_version"),))
+    if raw.get("tool_version") != VERSION:
+        reasons.append("tool_version %r is not %s" % (raw.get("tool_version"), VERSION))
+    if raw.get("evidence_kind") != "WindowsCollection":
+        reasons.append("evidence_kind %r is not WindowsCollection" % (raw.get("evidence_kind"),))
+    if raw.get("engagement_id") != batch.get("engagement_id"):
+        reasons.append("engagement_id %r does not equal the batch engagement_id %r"
+                       % (raw.get("engagement_id"), batch.get("engagement_id")))
+    for key in ("asset_id", "site_id"):
+        if raw.get(key) != target.get(key):
+            reasons.append("%s %r does not equal the ledger target %s %r" % (key, raw.get(key), key, target.get(key)))
+    host = raw.get("host")
+    if not isinstance(host, dict):
+        reasons.append("host is not an object, so host.computer_name cannot be verified against the ledger target %r"
+                       % (target.get("computer_name"),))
+    elif str(host.get("computer_name", "")).casefold() != str(target.get("computer_name", "")).casefold():
+        reasons.append("host.computer_name %r does not equal the ledger target computer_name %r"
+                       % (host.get("computer_name"), target.get("computer_name")))
+    if raw.get("scope_sha256") != batch.get("scope_sha256"):
+        reasons.append("scope_sha256 does not equal the batch's recorded scope_sha256")
+    if raw.get("collector_sha256") != batch.get("collector_sha256"):
+        reasons.append("collector_sha256 does not equal the collector_sha256 the batch was sealed with")
+    return reasons
 
 
 def verify_batch(batch_dir) -> dict[str, Any]:

@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "engagement_id": "LAB-U1",
+  "approved_for_lab": false,
+  "approval_reference": "SET-ON-APPROVAL",
+  "targets": [
+    {
+      "asset_id": "WIN10",
+      "site_id": "LAB",
+      "computer_name": "WIN10",
+      "connection_name": "WIN10",
+      "transport": "HttpsNegotiate",
+      "enabled": true
+    }
+  ],
+  "wireless": {
+    "corporate_ssids": [
+      "CORP-WIFI"
+    ]
+  },
+  "network": {
+    "enabled": false
+  }
+}

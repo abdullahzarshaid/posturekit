@@ -147,10 +147,24 @@ function Peap-Config { param([string]$Perform, [string]$Root = 'ab cd ef 01 23 4
               </Eap>
 "@
 }
-function Tls-Config { param([string]$Prompt, [string[]]$Roots, [string]$Names = '')
+# EAP-TLS profile shapes. The V1 schema (EapTlsConnectionPropertiesV1) holds only the ServerValidation
+# block: DisableUserPromptForServerValidation (the prompt policy), ServerNames and TrustedRootCA. The
+# enablement element PerformServerValidation lives in the V2 namespace
+# (EapTlsConnectionPropertiesV2) as a child of EapType next to AcceptServerName. Microsoft's own
+# WPA3-Enterprise 192-bit TLS sample has PerformServerValidation true together with
+# DisableUserPromptForServerValidation false, which shows the two settings are independent:
+#   https://learn.microsoft.com/en-us/windows/win32/nativewifi/wpa3-enterprise-192bit-with-tls-profile-sample
+#   https://learn.microsoft.com/en-us/windows/win32/eaphost/eaptlsconnectionpropertiesv1schema-disableuserpromptforservervalidation-servervalidationparameters-element
+# $Perform '' produces a V1-only profile (no V2 element); 'true' / 'false' add the V2 element.
+function Tls-Config { param([string]$Prompt, [string[]]$Roots, [string]$Names = '', [string]$Perform = '')
     $rootXml = ''
     foreach ($r in @($Roots)) { if ($null -ne $r) { $rootXml += "<TrustedRootCA>$r</TrustedRootCA>" } }
     $promptXml = if ($null -ne $Prompt -and $Prompt -ne '') { "<DisableUserPromptForServerValidation>$Prompt</DisableUserPromptForServerValidation>" } else { '' }
+    $v2Xml = ''
+    if ($null -ne $Perform -and $Perform -ne '') {
+        $v2Xml = "<PerformServerValidation xmlns=`"http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV2`">$Perform</PerformServerValidation>" +
+                 "<AcceptServerName xmlns=`"http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV2`">false</AcceptServerName>"
+    }
 @"
               <Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1">
                 <Type>13</Type>
@@ -162,10 +176,79 @@ function Tls-Config { param([string]$Prompt, [string[]]$Roots, [string]$Names = 
                     $rootXml
                   </ServerValidation>
                   <DifferentUsername>false</DifferentUsername>
+                  $v2Xml
                 </EapType>
               </Eap>
 "@
 }
+# The Microsoft WPA3-Enterprise 192-bit TLS sample (first page above), transcribed as published
+# on 2025-05-14: a V1 ServerValidation block with DisableUserPromptForServerValidation false,
+# empty ServerNames and one placeholder TrustedRootCA, then the V2 PerformServerValidation true
+# and AcceptServerName true. The sample's element text carries a line break before the closing
+# tag, which is kept here because the reader must trim it.
+$xmlTlsMicrosoftSample = @"
+<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+    <name>WPA3Enterprise192BitMode</name>
+    <SSIDConfig>
+        <SSID>
+            <name>WPA3Enterprise192BitMode</name>
+        </SSID>
+        <nonBroadcast>false</nonBroadcast>
+    </SSIDConfig>
+    <connectionType>ESS</connectionType>
+    <connectionMode>manual</connectionMode>
+    <autoSwitch>false</autoSwitch>
+    <MSM>
+        <security>
+            <authEncryption>
+                <authentication>WPA3ENT192</authentication>
+                <encryption>GCMP256</encryption>
+                <useOneX>true</useOneX>
+            </authEncryption>
+            <OneX xmlns="http://www.microsoft.com/networking/OneX/v1">
+                <authMode>user</authMode>
+                <EAPConfig>
+                    <EapHostConfig xmlns="http://www.microsoft.com/provisioning/EapHostConfig">
+                        <EapMethod>
+                            <Type xmlns="http://www.microsoft.com/provisioning/EapCommon">13
+                            </Type>
+                            <VendorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0
+                            </VendorId>
+                            <VendorType xmlns="http://www.microsoft.com/provisioning/EapCommon">0
+                            </VendorType>
+                            <AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0
+                            </AuthorId>
+                        </EapMethod>
+                        <Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig">
+                            <Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1">
+                                <Type>13</Type>
+                                <EapType xmlns="http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV1">
+                                    <CredentialsSource>
+                                        <CertificateStore>
+                                            <SimpleCertSelection>true</SimpleCertSelection>
+                                        </CertificateStore>
+                                    </CredentialsSource>
+                                    <ServerValidation>
+                                        <DisableUserPromptForServerValidation>false</DisableUserPromptForServerValidation>
+                                        <ServerNames></ServerNames>
+                                        <TrustedRootCA>00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 00 11 22 33 </TrustedRootCA>
+                                    </ServerValidation>
+                                    <DifferentUsername>false</DifferentUsername>
+                                    <PerformServerValidation xmlns="http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV2">true
+                                    </PerformServerValidation>
+                                    <AcceptServerName xmlns="http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV2">true
+                                    </AcceptServerName>
+                                </EapType>
+                            </Eap>
+                        </Config>
+                    </EapHostConfig>
+                </EAPConfig>
+            </OneX>
+        </security>
+    </MSM>
+</WLANProfile>
+"@
 function Ttls-Config { param([string]$Prompt, [string[]]$Hashes, [string]$Names = '', [bool]$Block = $true)
     $hashXml = ''
     foreach ($h in @($Hashes)) { if ($null -ne $h) { $hashXml += "<TrustedRootCAHash>$h</TrustedRootCAHash>" } }
@@ -194,6 +277,8 @@ $xmlTlsRootNoPrompt = Wrap-Profile 13 (Tls-Config 'true' @($rootA))
 $xmlTlsPromptAllowed = Wrap-Profile 13 (Tls-Config 'false' @($rootA))
 $xmlTlsNoRoot = Wrap-Profile 13 (Tls-Config 'true' @())
 $xmlTlsTwoRootsNames = Wrap-Profile 13 (Tls-Config 'true' @($rootA, 'ff ee dd cc bb aa 99 88 77 66 55 44 33 22 11 00 ff ee dd cc') 'nps.corp.example')
+$xmlTlsV2FalseNoPromptRoot = Wrap-Profile 13 (Tls-Config 'true' @($rootA) '' 'false')
+$xmlTlsV2TruePromptAllowed = Wrap-Profile 13 (Tls-Config 'false' @($rootA) '' 'true')
 $xmlMalformed = '<?xml version="1.0"?><WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1"><name>Broken</name><MSM><security>'
 # Same PEAP content written with explicit namespace prefixes instead of default namespaces.
 $xmlNamespaced = @"
@@ -322,37 +407,60 @@ Check 'eap: PEAP missing PerformServerValidation element -> null with basis' {
 Check 'eap: PEAP element only inside an XML comment -> null (namespace navigation, not regex)' {
     $r = Resolve-EapServerValidation $xmlCommentTrap
     ($null -eq $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'missing' }
-Check 'eap: EAP-TLS trusted root pinned and user prompt disabled -> true' {
+# PEAP prompt policy: Peap-Config writes DisableUserPromptForServerValidation true, so override is false.
+Check 'eap: PEAP prompt disabled -> UserOverrideAllowed false (separate from PerformServerValidation)' {
+    $r = Resolve-EapServerValidation $xmlPeapFalse
+    ($r.UserOverrideAllowed -is [bool]) -and (-not $r.UserOverrideAllowed) -and $r.UserOverrideBasis -match 'DisableUserPromptForServerValidation is true' -and ($r.ServerCertValidation -is [bool]) -and (-not $r.ServerCertValidation) }
+# EAP-TLS. The prompt policy never decides ServerCertValidation; only the V2 PerformServerValidation does.
+Check 'eap: EAP-TLS V1 only (root pinned, prompt disabled) -> ServerCertValidation null, UserOverrideAllowed false, root count 1' {
     $r = Resolve-EapServerValidation $xmlTlsRootNoPrompt
-    ($r.ServerCertValidation -is [bool]) -and $r.ServerCertValidation -and $r.EapType -eq 13 -and $r.TrustedRootCount -eq 1 -and (-not $r.ServerNamesPresent) }
-Check 'eap: EAP-TLS user prompt allowed -> false' {
+    ($null -eq $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'V1 profile, enablement not stated' -and $r.EapType -eq 13 -and $r.TrustedRootCount -eq 1 -and (-not $r.ServerNamesPresent) -and ($r.UserOverrideAllowed -is [bool]) -and (-not $r.UserOverrideAllowed) }
+Check 'eap: EAP-TLS prompt allowed -> UserOverrideAllowed true, ServerCertValidation null (no V2 element)' {
     $r = Resolve-EapServerValidation $xmlTlsPromptAllowed
-    ($r.ServerCertValidation -is [bool]) -and (-not $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'user can accept any server' }
-Check 'eap: EAP-TLS block without trusted root or server names -> null with basis' {
+    ($r.UserOverrideAllowed -is [bool]) -and $r.UserOverrideAllowed -and $r.UserOverrideBasis -match 'DisableUserPromptForServerValidation is false' -and ($null -eq $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'V1 profile, enablement not stated' }
+Check 'eap: EAP-TLS V1 block without trusted root or server names -> null, root count 0, names absent' {
     $r = Resolve-EapServerValidation $xmlTlsNoRoot
-    ($null -eq $r.ServerCertValidation) -and $r.TrustedRootCount -eq 0 -and (-not $r.ServerNamesPresent) -and $r.ServerCertValidationBasis -match 'no trusted root CA and no server names' }
-Check 'eap: EAP-TLS two roots and server names -> true, TrustedRootCount 2, ServerNamesPresent true' {
+    ($null -eq $r.ServerCertValidation) -and $r.TrustedRootCount -eq 0 -and (-not $r.ServerNamesPresent) -and $r.ServerCertValidationBasis -match 'enablement not stated' }
+Check 'eap: EAP-TLS V1 two roots and server names -> null, TrustedRootCount 2, ServerNamesPresent true' {
     $r = Resolve-EapServerValidation $xmlTlsTwoRootsNames
-    $r.ServerCertValidation -and $r.TrustedRootCount -eq 2 -and $r.ServerNamesPresent }
-Check 'eap: EAP-TTLS DisablePrompt true with a root hash -> true, TrustedRootCount 1' {
+    ($null -eq $r.ServerCertValidation) -and $r.TrustedRootCount -eq 2 -and $r.ServerNamesPresent }
+Check 'eap: EAP-TLS V2 PerformServerValidation false, prompt disabled, root present -> false, override false, root count 1' {
+    $r = Resolve-EapServerValidation $xmlTlsV2FalseNoPromptRoot
+    ($r.ServerCertValidation -is [bool]) -and (-not $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'PerformServerValidation \(V2\) is false' -and ($r.UserOverrideAllowed -is [bool]) -and (-not $r.UserOverrideAllowed) -and $r.TrustedRootCount -eq 1 }
+Check 'eap: EAP-TLS V2 PerformServerValidation true with prompt allowed -> true and UserOverrideAllowed true' {
+    $r = Resolve-EapServerValidation $xmlTlsV2TruePromptAllowed
+    ($r.ServerCertValidation -is [bool]) -and $r.ServerCertValidation -and $r.ServerCertValidationBasis -match 'PerformServerValidation \(V2\) is true' -and ($r.UserOverrideAllowed -is [bool]) -and $r.UserOverrideAllowed }
+Check 'eap: Microsoft WPA3-Enterprise TLS sample shape -> true, override true, root count 1, no names' {
+    $r = Resolve-EapServerValidation $xmlTlsMicrosoftSample
+    ($r.ServerCertValidation -is [bool]) -and $r.ServerCertValidation -and $r.EapType -eq 13 -and ($r.UserOverrideAllowed -is [bool]) -and $r.UserOverrideAllowed -and $r.TrustedRootCount -eq 1 -and (-not $r.ServerNamesPresent) }
+Check 'eap: EAP-TLS PerformServerValidation in the PEAP V2 namespace is not the TLS enablement element -> null' {
+    $x = Wrap-Profile 13 ((Tls-Config 'true' @($rootA)) + '<PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">true</PerformServerValidation>')
+    $r = Resolve-EapServerValidation $x
+    ($null -eq $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'enablement not stated' }
+# EAP-TTLS has no enablement element: ServerCertValidation is always null; the override policy and roots are recorded.
+Check 'eap: EAP-TTLS DisablePrompt true with a root hash -> ServerCertValidation null (TTLS has no enablement element), override false, TrustedRootCount 1' {
     $r = Resolve-EapServerValidation $xmlTtlsTrue
-    ($r.ServerCertValidation -is [bool]) -and $r.ServerCertValidation -and $r.EapType -eq 21 -and $r.TrustedRootCount -eq 1 -and (-not $r.ServerNamesPresent) -and $r.ServerCertValidationBasis -match 'DisablePrompt is true' }
-Check 'eap: EAP-TTLS prompt allowed (DisablePrompt false) -> false' {
+    ($null -eq $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'TTLS has no enablement element' -and $r.EapType -eq 21 -and $r.TrustedRootCount -eq 1 -and (-not $r.ServerNamesPresent) -and ($r.UserOverrideAllowed -is [bool]) -and (-not $r.UserOverrideAllowed) -and $r.UserOverrideBasis -match 'DisablePrompt is true' }
+Check 'eap: EAP-TTLS prompt allowed (DisablePrompt false) -> UserOverrideAllowed true, ServerCertValidation null' {
     $r = Resolve-EapServerValidation $xmlTtlsPromptAllowed
-    ($r.ServerCertValidation -is [bool]) -and (-not $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'user can accept any server' }
-Check 'eap: EAP-TTLS block without root hash or server names -> null with basis' {
+    ($null -eq $r.ServerCertValidation) -and ($r.UserOverrideAllowed -is [bool]) -and $r.UserOverrideAllowed -and $r.UserOverrideBasis -match 'DisablePrompt is false' }
+Check 'eap: EAP-TTLS block without root hash or server names -> null, root count 0' {
     $r = Resolve-EapServerValidation $xmlTtlsNoRoot
-    ($null -eq $r.ServerCertValidation) -and $r.TrustedRootCount -eq 0 -and $r.ServerCertValidationBasis -match 'no trusted root CA hash and no server names' }
-Check 'eap: EAP-TTLS ServerValidation block absent -> null with basis' {
+    ($null -eq $r.ServerCertValidation) -and $r.TrustedRootCount -eq 0 -and (-not $r.ServerNamesPresent) -and $r.ServerCertValidationBasis -match 'TTLS has no enablement element' }
+Check 'eap: EAP-TTLS ServerValidation block absent -> null, UserOverrideAllowed null with basis' {
     $r = Resolve-EapServerValidation $xmlTtlsNoBlock
-    ($null -eq $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'ServerValidation block is missing' }
-Check 'eap: EAP-TTLS server names only, no root hash -> null, ServerNamesPresent true' {
+    ($null -eq $r.ServerCertValidation) -and ($null -eq $r.UserOverrideAllowed) -and $r.UserOverrideBasis -match 'ServerValidation block is missing' -and $r.TrustedRootCount -eq 0 }
+Check 'eap: EAP-TTLS server names only, no root hash -> null, ServerNamesPresent true, override false' {
     $r = Resolve-EapServerValidation $xmlTtlsNamesOnly
-    ($null -eq $r.ServerCertValidation) -and $r.ServerNamesPresent -and $r.TrustedRootCount -eq 0 -and $r.ServerCertValidationBasis -match 'server names only' }
-Check 'eap: PerformServerValidation inside a TTLS profile is ignored (PEAP rule only)' {
+    ($null -eq $r.ServerCertValidation) -and $r.ServerNamesPresent -and $r.TrustedRootCount -eq 0 -and ($r.UserOverrideAllowed -is [bool]) -and (-not $r.UserOverrideAllowed) }
+Check 'eap: PerformServerValidation inside a TTLS profile is ignored (TTLS stays null, override true)' {
     $x = Wrap-Profile 21 ((Ttls-Config 'false' @($hashA)) + '<PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">true</PerformServerValidation>')
     $r = Resolve-EapServerValidation $x
-    ($r.ServerCertValidation -is [bool]) -and (-not $r.ServerCertValidation) }
+    ($null -eq $r.ServerCertValidation) -and ($r.UserOverrideAllowed -is [bool]) -and $r.UserOverrideAllowed }
+Check 'eap: PEAP ServerValidation block absent -> UserOverrideAllowed null, PerformServerValidation still read' {
+    $x = Wrap-Profile 25 ('<Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1"><Type>25</Type><EapType xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV1"><PeapExtensions><PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">true</PerformServerValidation></PeapExtensions></EapType></Eap>')
+    $r = Resolve-EapServerValidation $x
+    ($null -eq $r.UserOverrideAllowed) -and $r.UserOverrideBasis -match 'ServerValidation block is missing' -and ($r.ServerCertValidation -is [bool]) -and $r.ServerCertValidation }
 Check 'eap: malformed XML -> null with parse basis' {
     $r = Resolve-EapServerValidation $xmlMalformed
     ($null -eq $r.ServerCertValidation) -and $r.ServerCertValidationBasis -match 'could not be parsed' }
@@ -405,7 +513,15 @@ Check 'aggregate: PSK profiles are not enterprise; no 802.1X -> 0 / 0' {
     $r.EnterpriseNetworkCount -eq 0 -and $r.EnterpriseNoServerValidationCount -eq 0 -and $r.EnterpriseServerValidationUnknownCount -eq 0 }
 Check 'aggregate: empty profile list -> 0 / 0' {
     $r = Resolve-EnterpriseValidationCounts @()
-    $r.EnterpriseNoServerValidationCount -eq 0 -and $r.EnterpriseServerValidationUnknownCount -eq 0 }
+    $r.EnterpriseNoServerValidationCount -eq 0 -and $r.EnterpriseServerValidationUnknownCount -eq 0 -and $r.EnterpriseUserOverrideAllowedCount -eq 0 }
+function OvProf { param([string]$Name, [bool]$Dot1X, [object]$Val, [object]$Override)
+    [pscustomobject]@{ Name=$Name; Authentication='WPA2-Enterprise'; Dot1X=$Dot1X; ServerCertValidation=$Val; UserOverrideAllowed=$Override } }
+Check 'aggregate: UserOverrideAllowed true on two of three 802.1X profiles -> OverrideAllowed 2, validation counts untouched' {
+    $r = Resolve-EnterpriseValidationCounts @((OvProf 'A' $true $true $true), (OvProf 'B' $true $null $true), (OvProf 'C' $true $true $false), (OvProf 'D' $false $null $true))
+    $r.EnterpriseNetworkCount -eq 3 -and $r.EnterpriseUserOverrideAllowedCount -eq 2 -and ($null -eq $r.EnterpriseNoServerValidationCount) -and $r.EnterpriseServerValidationUnknownCount -eq 1 }
+Check 'aggregate: profiles without a UserOverrideAllowed property -> OverrideAllowed 0, no exception' {
+    $r = Resolve-EnterpriseValidationCounts @((Prof 'A' 'WPA2-Enterprise' $true $true))
+    $r.EnterpriseUserOverrideAllowedCount -eq 0 }
 
 # ================================================================ open / unreadable aggregate
 function OProf { param([string]$Name, [object]$Auth, [string]$Mode = 'Connect automatically')
@@ -443,6 +559,59 @@ Check 'corporate: env text absent / empty / only separators -> null list' {
     ($null -eq (ConvertFrom-CorporateSsidList $null)) -and ($null -eq (ConvertFrom-CorporateSsidList '')) -and ($null -eq (ConvertFrom-CorporateSsidList ' ; ;')) }
 Check 'corporate: env text "A; B;" -> two trimmed entries' {
     $l = @(ConvertFrom-CorporateSsidList 'A; B;'); $l.Count -eq 2 -and $l[0] -eq 'A' -and $l[1] -eq 'B' }
+
+# ================================================================ posture (inventory status propagation)
+function PProf { param([string]$Name, [object]$Auth, [string]$Cipher = 'CCMP', [string]$Mode = 'Connect automatically', [bool]$Dot1X = $false, [object]$Val = $null, [object]$Override = $null)
+    [pscustomobject]@{ Name=$Name; ProfileScope='AllUser'; Authentication=$Auth; Cipher=$Cipher; ConnectionMode=$Mode; Dot1X=$Dot1X;
+                       ServerCertValidation=$Val; UserOverrideAllowed=$Override; TrustedRootCount=$null; ServerNamesPresent=$null } }
+$ifaceConnected = [pscustomobject]@{ State='connected'; Ssid='CORP-WIFI'; Authentication='WPA2-Personal'; Cipher='CCMP'; Band='5 GHz'; RadioType='802.11ax'; AkmSuite=6 }
+$presenceOne = [pscustomobject]@{ Present=1; Basis='netsh wlan show interfaces reports 1 wireless interface(s) on the system.' }
+$profileCountFields = @('ProfilesTotal','OpenNetworkCount','OpenAutoConnectCount','LegacyEncryptionCount','TkipCipherCount','EnterpriseNetworkCount',
+                        'EnterpriseNoServerValidationCount','EnterpriseServerValidationUnknownCount','EnterpriseUserOverrideAllowedCount',
+                        'PskNetworkCount','CorporatePskNetworkCount','UnreadableProfileCount')
+Check 'posture: whole-list failure (Error) -> every profile-derived count null, connection fields intact' {
+    $r = Resolve-WirelessPosture -Profiles @() -InventoryStatus 'Error' -InventoryBasis 'netsh wlan show profiles output was not understood.' `
+        -Interface $ifaceConnected -CorporateSsids (ConvertFrom-CorporateSsidList 'CORP-WIFI') -Presence $presenceOne -CorporateSsidSource 'scope'
+    $allNull = $true
+    foreach ($f in $profileCountFields) { if ($null -ne $r.$f) { $allNull = $false } }
+    $allNull -and $r.ProfileInventoryStatus -eq 'Error' -and $r.ProfileInventoryBasis -match 'not understood' -and $r.WirelessPresent -eq 1 -and
+        ($r.ConnectedAuthWpa2OrBetter -is [bool]) -and $r.ConnectedAuthWpa2OrBetter -and ($r.ConnectedManagementFrameProtection -is [bool]) -and $r.ConnectedManagementFrameProtection -and
+        $r.ConnectedPmfBasis -match 'PSK-SHA256' -and $r.CorporateSsidSource -eq 'scope' }
+Check 'posture: Error ignores any profile records that were passed in' {
+    $r = Resolve-WirelessPosture -Profiles @((PProf 'Cafe' 'Open')) -InventoryStatus 'Error' -InventoryBasis 'x' -Interface $null -CorporateSsids $null
+    ($null -eq $r.OpenNetworkCount) -and ($null -eq $r.ProfilesTotal) -and ($null -eq $r.ConnectedAuthWpa2OrBetter) -and $r.ConnectedPmfBasis -match 'No wireless interface detail' }
+Check 'posture: empty successful list (Collected) -> zeros, not nulls' {
+    $r = Resolve-WirelessPosture -Profiles @() -InventoryStatus 'Collected' -InventoryBasis 'netsh wlan show profiles reports that no profile is saved.' `
+        -Interface $null -CorporateSsids (ConvertFrom-CorporateSsidList 'CORP-WIFI') -Presence $presenceOne
+    $allZero = $true
+    foreach ($f in $profileCountFields) { if (-not ($r.$f -is [int]) -or $r.$f -ne 0) { $allZero = $false } }
+    $allZero -and $r.ProfileInventoryStatus -eq 'Collected' -and $r.ProfileInventoryBasis -match 'no profile is saved' }
+Check 'posture: Collected with no corporate list -> CorporatePskNetworkCount null, other counts integers' {
+    $r = Resolve-WirelessPosture -Profiles @((PProf 'Home' 'WPA2-Personal')) -InventoryStatus 'Collected' -InventoryBasis 'listed 1' -Interface $null -CorporateSsids $null
+    ($null -eq $r.CorporatePskNetworkCount) -and $r.PskNetworkCount -eq 1 -and $r.ProfilesTotal -eq 1 -and $r.OpenNetworkCount -eq 0 -and $r.LegacyEncryptionCount -eq 0 }
+Check 'posture: one unreadable plus one open profile -> Partial, OpenNetworkCount 1, clean counts null' {
+    $r = Resolve-WirelessPosture -Profiles @((PProf 'Mangled' $null), (PProf 'Cafe' 'Open')) -InventoryStatus 'Collected' -InventoryBasis 'listed 2' `
+        -Interface $null -CorporateSsids (ConvertFrom-CorporateSsidList 'CORP-WIFI')
+    $r.ProfileInventoryStatus -eq 'Partial' -and $r.ProfileInventoryBasis -match '1 profile\(s\) could not be read \(Mangled\)' -and
+        $r.OpenNetworkCount -eq 1 -and $r.OpenAutoConnectCount -eq 1 -and $r.ProfilesTotal -eq 2 -and $r.UnreadableProfileCount -eq 1 -and
+        ($null -eq $r.LegacyEncryptionCount) -and ($null -eq $r.TkipCipherCount) -and ($null -eq $r.EnterpriseNoServerValidationCount) -and ($null -eq $r.CorporatePskNetworkCount) -and
+        $r.EnterpriseNetworkCount -eq 0 -and $r.PskNetworkCount -eq 0 }
+Check 'posture: Partial keeps a known legacy count (a known-bad profile is still a Fail)' {
+    $r = Resolve-WirelessPosture -Profiles @((PProf 'Mangled' $null), (PProf 'Old' 'WPA-Personal' 'TKIP')) -InventoryStatus 'Collected' -InventoryBasis 'listed 2' -Interface $null -CorporateSsids $null
+    $r.ProfileInventoryStatus -eq 'Partial' -and $r.LegacyEncryptionCount -eq 1 -and $r.TkipCipherCount -eq 1 -and ($null -eq $r.OpenNetworkCount) -and ($null -eq $r.OpenAutoConnectCount) }
+Check 'posture: Partial passed in explicitly with all profiles readable -> stays Partial, zero counts null' {
+    $r = Resolve-WirelessPosture -Profiles @((PProf 'Home' 'WPA2-Personal')) -InventoryStatus 'Partial' -InventoryBasis 'one profile skipped' -Interface $null -CorporateSsids $null
+    $r.ProfileInventoryStatus -eq 'Partial' -and ($null -eq $r.LegacyEncryptionCount) -and ($null -eq $r.OpenNetworkCount) -and $r.PskNetworkCount -eq 1 }
+Check 'posture: Collected with 802.1X profiles -> enterprise counts carried through, override counted' {
+    $r = Resolve-WirelessPosture -Profiles @((PProf 'Corp' 'WPA2-Enterprise' 'CCMP' 'Connect automatically' $true $false $true), (PProf 'Corp2' 'WPA2-Enterprise' 'CCMP' 'Connect automatically' $true $true $false)) `
+        -InventoryStatus 'Collected' -InventoryBasis 'listed 2' -Interface $null -CorporateSsids $null
+    $r.EnterpriseNetworkCount -eq 2 -and $r.EnterpriseNoServerValidationCount -eq 1 -and $r.EnterpriseServerValidationUnknownCount -eq 0 -and $r.EnterpriseUserOverrideAllowedCount -eq 1 }
+Check 'posture: disconnected interface -> connection fields null with the not-associated basis' {
+    $r = Resolve-WirelessPosture -Profiles @() -InventoryStatus 'Collected' -InventoryBasis 'x' -Interface ([pscustomobject]@{ State='disconnected'; Authentication=$null; AkmSuite=$null }) -CorporateSsids $null
+    ($null -eq $r.ConnectedAuthWpa2OrBetter) -and ($null -eq $r.ConnectedManagementFrameProtection) -and $r.ConnectedPmfBasis -match 'not associated' }
+Check 'posture: unrecognised inventory status is treated as Error' {
+    $r = Resolve-WirelessPosture -Profiles @((PProf 'Home' 'WPA2-Personal')) -InventoryStatus 'Whatever' -InventoryBasis $null -Interface $null -CorporateSsids $null
+    $r.ProfileInventoryStatus -eq 'Error' -and ($null -eq $r.ProfilesTotal) -and $r.ProfileInventoryBasis -match 'could not be enumerated' }
 
 # ================================================================ netsh field reader
 Check 'field: Get-NetshField reads State from the interface text' { (Get-NetshField $ifaceEnglishOne 'State') -eq 'connected' }

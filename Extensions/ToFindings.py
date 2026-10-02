@@ -3,12 +3,26 @@
 
 Input
 -----
+  Manifest.txt         the derived folder's seal, written by Analyze.py (or
+                       Code/SealDerived.py); verified before anything is read
   Tests.csv            rule results produced by Analyze.py
   Coverage.csv         per-asset collection status produced by Analyze.py
-  Evidence.json        optional, the same run's package (source counts per asset)
+  Evidence.json        optional, the same run's package (source counts per asset,
+                       engagement_id and the batch ids that were analysed)
   MissingUpdates.json  optional, produced by PatchCheck.py
   SoftwareRisk.json    optional, produced by SoftwareCheck.py
   ReviewDispositions   optional CSV of analyst dispositions for review rows
+
+The derived folder is verified exactly as Code/VerifyManifest.py verifies it
+(every listed file present, SHA-256 equal, nothing unmanifested) BEFORE
+Tests.csv, Coverage.csv or Evidence.json is read. A folder that fails, has no
+Manifest.txt, or whose Evidence.json names a different engagement than
+--engagement-id is not converted: the register is written with an empty
+findings list, one GAP-IN entry and register_status InputRejected, exit 2.
+A --patch or --software file must record the batch it was assessed from
+(source_batch); when Evidence.json lists the analysed batch ids it must be one
+of them, or its hosts are recorded as GAP-IN entries and no finding is drawn
+from them (exit 4, like a missing input path).
 
 Output
 ------
@@ -52,11 +66,23 @@ from datetime import datetime, timezone
 ANALYST = "ANALYST REQUIRED"
 
 # Exit codes. 0: register written and every supplied input was read.
+# 2: the derived folder itself was rejected (Manifest.txt missing or failing,
+#    or Evidence.json names another engagement). Nothing was converted; the
+#    register holds an empty findings list and one GAP-IN entry.
 # 4: register written, but a required input named on the command line was
-#    absent (recorded as a coverage gap). The caller must not treat the draft
-#    as complete.
+#    absent or does not belong to the analysed batches (recorded as a coverage
+#    gap). The caller must not treat the draft as complete.
 EXIT_OK = 0
+EXIT_INPUT_REJECTED = 2
 EXIT_REQUIRED_INPUT = 4
+DEFAULT_ENGAGEMENT_ID = "LAB-001"
+
+# The manifest line form Code/VerifyManifest.py checks: "sha256  name".
+MANIFEST_LINE = re.compile(r"^([0-9a-fA-F]{64})  ([^/\\]+)$")
+
+# A CVE identifier as MITRE issues it. Anything else in the vendor's "cve" field
+# (ADV220005 and the like) is an advisory and is never called a CVE.
+CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
 
 # Configuration rules mapped to the weakness they evidence. A rule with no entry
 # gets no CWE rather than a guessed one.
@@ -166,6 +192,195 @@ def _build_tuple(text):
     if not all(part.isdigit() for part in parts):
         return None
     return tuple(int(part) for part in parts)
+
+
+def _is_cve(identifier):
+    return bool(identifier) and CVE_RE.fullmatch(str(identifier).strip()) is not None
+
+
+def _plural(count, singular, plural):
+    return "%d %s" % (count, singular if count == 1 else plural)
+
+
+def _record_summary(updates):
+    """('N vendor records: X CVEs and Y advisories (ADV...)', cve_rows, advisory_ids)
+    for the outstanding rows. Advisories are listed by identifier; the bracket
+    is omitted when there are none."""
+    cves = [u for u in updates if _is_cve(u.get("cve"))]
+    advisories = [str(u.get("cve")) for u in updates if not _is_cve(u.get("cve"))]
+    text = "%s: %s and %s" % (_plural(len(updates), "vendor record", "vendor records"),
+                               _plural(len(cves), "CVE", "CVEs"),
+                               _plural(len(advisories), "advisory", "advisories"))
+    if advisories:
+        text += " (%s)" % ", ".join(advisories)
+    return text, cves, advisories
+
+
+# ------------------------------------------------------------ derived input
+def verify_derived_folder(derived):
+    """Verify a derived folder's Manifest.txt the way Code/VerifyManifest.py does.
+
+    Returns the list of reasons; empty when the folder is exactly what its
+    manifest says: every listed file present as a regular file, SHA-256 equal,
+    no duplicate or malformed lines, and no regular file other than
+    Manifest.txt that the manifest does not name.
+    """
+    folder = os.path.abspath(derived)
+    if not os.path.isdir(folder) or os.path.islink(folder):
+        return ["%s is not a directory, or is a symlink" % folder]
+    manifest = os.path.join(folder, "Manifest.txt")
+    if not os.path.isfile(manifest) or os.path.islink(manifest):
+        return ["Manifest.txt is missing from %s, so the derived output was never sealed and nothing in it "
+                "can be verified (re-run Analyze.py, or seal the folder with Code/SealDerived.py)" % folder]
+    reasons = []
+    seen = set()
+    with open(manifest, encoding="utf-8-sig") as handle:
+        lines = handle.read().splitlines()
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        match = MANIFEST_LINE.match(line)
+        if not match:
+            reasons.append("Manifest.txt line %d: malformed" % number)
+            continue
+        expected, name = match.groups()
+        if name in seen:
+            reasons.append("%s: duplicate manifest entry" % name)
+            continue
+        seen.add(name)
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path) or os.path.islink(path):
+            reasons.append("%s: MISSING OR INVALID" % name)
+            continue
+        if _sha256(path).lower() != expected.lower():
+            reasons.append("%s: HASH MISMATCH against Manifest.txt" % name)
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if name == "Manifest.txt" or name in seen or not os.path.isfile(path) or os.path.islink(path):
+            continue
+        reasons.append("%s: UNMANIFESTED" % name)
+    return reasons
+
+
+def _evidence_metadata(derived):
+    """Evidence.json's metadata block when the derived folder carries one, else {}."""
+    path = os.path.join(derived, "Evidence.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        package = _read_json(path)
+    except SystemExit:
+        return {}
+    meta = package.get("metadata") if isinstance(package, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
+def _analysed_batches(meta):
+    """The batch ids the evidence set was built from (metadata.batch_ids, else
+    batch_id, comma-joined for a merge), or [] when it records none."""
+    ids = meta.get("batch_ids")
+    if isinstance(ids, list) and ids:
+        return [str(item) for item in ids]
+    single = meta.get("batch_id")
+    if isinstance(single, str) and single.strip():
+        return [part.strip() for part in single.split(",") if part.strip()]
+    return []
+
+
+def _batch_membership(kind, host_block, document, analysed):
+    """None when the host block (or its document) records a source_batch that is one
+    of the analysed batches; otherwise the reason it cannot be used."""
+    source = host_block.get("source_batch")
+    if source is None:
+        source = document.get("source_batch")
+    if source is None or not str(source).strip():
+        return ("the %s output records no source_batch, so the batch it was assessed from cannot be "
+                "established" % kind)
+    if analysed and str(source) not in analysed:
+        return ("the %s output records source_batch %s, which is not one of the analysed batches (%s)"
+                % (kind, source, ", ".join(analysed)))
+    return None
+
+
+def _foreign_input_gap(kind, path, host_block, reason):
+    """A supplied --patch / --software result that does not belong to the batches
+    Analyze.py normalised. It is recorded, never converted into a finding."""
+    asset = host_block.get("asset_id") or host_block.get("computer_name")
+    return {
+        "id": None,   # numbered when appended to the register
+        "kind": "CoverageGap",
+        "title": "Required %s input does not belong to the analysed batches" % kind,
+        "severity": "Not assessed",
+        "status": "Not tested",
+        "affected_assets": [asset] if asset else [],
+        "asset_id": asset,
+        "input_kind": kind,
+        "input_path": path,
+        "description": ("%s output does not belong to the analysed batches: %s. File supplied as --%s: %s. "
+                        "The %s result for this host was not converted." % (kind, reason, kind, path, kind)),
+        "observed_result": "Input not converted: %s" % path,
+        "impact": ("This host is UNASSESSED for %s in this register. The result exists, but it cannot be tied "
+                   "to the evidence set that was analysed, so it must not be presented as part of it." % kind),
+        "remediation": ("Run the %s assessment against the same sealed batch that Analyze.py normalised (its "
+                        "batch_id is recorded in Evidence.json) and supply the file it writes." % kind),
+        "limitations": "The file was read; its batch lineage did not match the evidence set.",
+        "method": "source_batch recorded by the assessment compared with the batch ids in Evidence.json metadata.",
+        "validation": "Not determined.",
+    }
+
+
+def _write_register(output, document):
+    os.makedirs(output, exist_ok=True)
+    path = os.path.join(output, "findings.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=1)
+    return path
+
+
+def _reject_input(arguments, reason):
+    """The derived folder cannot be trusted: write a register that converts nothing
+    (empty findings, one GAP-IN entry, register_status InputRejected) and exit 2."""
+    folder = os.path.abspath(arguments.derived)
+    gap = {
+        "id": "GAP-IN-01",
+        "kind": "CoverageGap",
+        "title": "Derived analysis input rejected",
+        "severity": "Not assessed",
+        "status": "Not tested",
+        "affected_assets": [],
+        "input_kind": "derived",
+        "input_path": folder,
+        "description": "Derived analysis input rejected: %s" % reason,
+        "observed_result": "The derived folder %s was not converted." % folder,
+        "impact": ("Nothing in this register was drawn from the evidence. Every scoped asset is UNASSESSED "
+                   "here, and the draft must not be presented as a result of any kind."),
+        "remediation": ("Re-run Analyze.py from the sealed raw batch, or restore the sealed derived folder "
+                        "whose Manifest.txt verifies with Code/VerifyManifest.py, then convert again."),
+        "limitations": "No test row, coverage row or evidence package was read.",
+        "method": "Manifest.txt verification (Code/VerifyManifest.py rules) and engagement identity check.",
+        "validation": "Not determined.",
+    }
+    document = {
+        "schema_version": "1.0",
+        "register_status": "InputRejected",
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "engagement_id": arguments.engagement_id or DEFAULT_ENGAGEMENT_ID,
+        "notice": ("This register converts nothing. The derived analysis input was rejected before any "
+                   "finding could be drawn from it; see coverage_gaps."),
+        "input_rejection": {"folder": folder, "reason": reason},
+        "counts": {
+            "findings": 0, "coverage_gaps": 1, "review_queue": 0, "fields_awaiting_analyst": 0,
+            "dispositions_recorded": 0, "pending": 0, "scoped_assets": 0, "scoped_assets_complete": 0,
+            "required_input_failures": 1,
+        },
+        "findings": [],
+        "coverage_gaps": [gap],
+        "review_queue": [],
+    }
+    path = _write_register(arguments.output, document)
+    print("DERIVED INPUT REJECTED: %s" % reason)
+    print("Nothing was converted. Written : %s" % path)
+    return EXIT_INPUT_REJECTED
 
 
 def _config_findings(rows):
@@ -635,6 +850,11 @@ def _patch_finding(patch, index, host_position=None):
     feed_date = _feed_date(patch)
     kev_evaluated = _kev_evaluated(patch, updates)
     kev = [u for u in updates if u.get("known_exploited") is True]
+    # Vendor records are CVEs and advisories (ADV...). They are counted apart here
+    # from the rows themselves, so an older MissingUpdates.json without the split
+    # counts still reads correctly; an advisory is never called a CVE.
+    record_summary, cve_rows, advisories = _record_summary(updates)
+    kev_count = counts.get("known_exploited") if type(counts.get("known_exploited")) is int else len(kev)
 
     # The remediation target is the highest fixed build on the host's servicing
     # branch across every outstanding row, compared numerically. The worst-scoring
@@ -723,15 +943,22 @@ def _patch_finding(patch, index, host_position=None):
         "affected_asset_count": 1,
         "description": (
             "The host is running %s at servicing level %s. Microsoft has published fixes "
-            "that require a later build on this servicing branch; %d CVEs are carried by the "
-            "outstanding cumulative-update stream."
-            % (patch.get("os_caption"), patch.get("observed_build"), len(updates))),
+            "that require a later build on this servicing branch; the outstanding "
+            "cumulative-update stream carries %s."
+            % (patch.get("os_caption"), patch.get("observed_build"), record_summary)),
         "observed_result": (
-            "Servicing level %s. Outstanding CVEs: %d (%d rated 9.0 or above, %d rated "
+            "Servicing level %s. Outstanding: %s (%d rated 9.0 or above, %d rated "
             "7.0 to 8.9). Latest fixed build referenced: %s."
-            % (patch.get("observed_build"), len(updates),
+            % (patch.get("observed_build"), record_summary,
                counts.get("critical_9_plus", 0), counts.get("high_7_plus", 0),
                max_build or "not determined")),
+        "counts": {
+            "vendor_records": len(updates),
+            "cve_identifiers": len(cve_rows),
+            "advisory_identifiers": len(advisories),
+            "known_exploited": kev_count,
+        },
+        "advisories": advisories,
         "technical_interpretation": (
             "Determined by comparing the host's recorded servicing level against the build "
             "in which each fix shipped. No vulnerability was validated by execution."),
@@ -748,7 +975,8 @@ def _patch_finding(patch, index, host_position=None):
         "retest_guidance": "Re-collect the host evidence and confirm the servicing level has advanced past the current cumulative update for this branch.",
         "evidence": evidence,
         "cve_detail": [{
-            "cve": u["cve"], "kb": u.get("kb"), "cvss_base_score": u.get("cvss_base_score"),
+            "cve": u["cve"], "identifier_kind": "CVE" if _is_cve(u.get("cve")) else "advisory",
+            "kb": u.get("kb"), "cvss_base_score": u.get("cvss_base_score"),
             "cvss_vector": u.get("cvss_vector"), "fixed_build": u.get("fixed_build"),
             "known_exploited": u.get("known_exploited"),
         } for u in updates],
@@ -916,8 +1144,19 @@ def main():
     parser.add_argument("--dispositions", default=None,
                         help="completed Templates/ReviewDispositions.csv (optional)")
     parser.add_argument("--output", required=True, help="output directory")
-    parser.add_argument("--engagement-id", default="LAB-001")
+    parser.add_argument("--engagement-id", default=None,
+                        help="engagement the register is for; must equal Evidence.json's engagement_id when "
+                             "both are present (default: the engagement_id Evidence.json records, else %s)"
+                             % DEFAULT_ENGAGEMENT_ID)
     arguments = parser.parse_args()
+
+    # The derived folder is verified before a single row is read. An edited
+    # Tests.csv under an unchanged Manifest.txt, a missing manifest or an
+    # unmanifested file means nothing in the folder can be trusted.
+    reasons = verify_derived_folder(arguments.derived)
+    if reasons:
+        return _reject_input(arguments, "Manifest.txt verification of %s failed: %s"
+                             % (os.path.abspath(arguments.derived), "; ".join(reasons)))
 
     tests_path = os.path.join(arguments.derived, "Tests.csv")
     if not os.path.isfile(tests_path):
@@ -925,6 +1164,14 @@ def main():
     with open(tests_path, encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
     known_ids = {row.get("test_id") for row in rows if row.get("test_id")}
+
+    meta = _evidence_metadata(arguments.derived)
+    recorded_engagement = meta.get("engagement_id")
+    if arguments.engagement_id and recorded_engagement is not None and str(recorded_engagement) != arguments.engagement_id:
+        return _reject_input(arguments, "Evidence.json in %s records engagement_id %r but --engagement-id %r was given"
+                             % (os.path.abspath(arguments.derived), recorded_engagement, arguments.engagement_id))
+    engagement_id = arguments.engagement_id or (str(recorded_engagement) if recorded_engagement else DEFAULT_ENGAGEMENT_ID)
+    analysed_batches = _analysed_batches(meta)
 
     dispositions = {}
     if arguments.dispositions:
@@ -934,9 +1181,12 @@ def main():
 
     coverage_gaps = []
     required_input_failures = []
+    foreign_input_gaps = []
     # Both engines assess every scoped host and list them under "hosts"; older
     # outputs carry one host at the top level. Every host is read: an undetermined,
-    # unattempted or rejected host becomes a coverage gap, never silence.
+    # unattempted or rejected host becomes a coverage gap, never silence. A host
+    # whose result was assessed from a batch other than the analysed ones (or from
+    # no recorded batch) is a GAP-IN entry and is never converted.
     if arguments.patch:
         if not os.path.isfile(arguments.patch):
             required_input_failures.append(("patch", arguments.patch))
@@ -945,12 +1195,17 @@ def main():
             patch_hosts = patch.get("hosts") or [patch]
             inserted = 0
             for host_index, host_block in enumerate(patch_hosts, 1):
-                # Feed date and KEV availability are recorded once at the top level.
-                for key in ("feed_fetched_utc", "kev_available"):
+                # Feed date, KEV availability and (in older outputs) the source batch
+                # are recorded once at the top level.
+                for key in ("feed_fetched_utc", "kev_available", "source_batch"):
                     if key not in host_block and key in patch:
                         host_block[key] = patch[key]
                 status = host_block.get("status")
                 if status == "Excluded":
+                    continue
+                foreign = _batch_membership("patch", host_block, patch, analysed_batches)
+                if foreign:
+                    foreign_input_gaps.append(_foreign_input_gap("patch", arguments.patch, host_block, foreign))
                     continue
                 if status in ("Unknown", "EvidenceRejected", "NotAttempted"):
                     gap = _coverage_gap(host_block)
@@ -979,8 +1234,14 @@ def main():
             software = _read_json(arguments.software)
             software_hosts = software.get("hosts") or [software]
             for host_index, host_block in enumerate(software_hosts, 1):
+                if "source_batch" not in host_block and "source_batch" in software:
+                    host_block["source_batch"] = software["source_batch"]
                 status = host_block.get("status")
                 if status == "Excluded":
+                    continue
+                foreign = _batch_membership("software", host_block, software, analysed_batches)
+                if foreign:
+                    foreign_input_gaps.append(_foreign_input_gap("software", arguments.software, host_block, foreign))
                     continue
                 if status in ("Unknown", "EvidenceRejected", "NotAttempted"):
                     gap = _software_gap(host_block)
@@ -999,6 +1260,10 @@ def main():
 
     for kind, path in required_input_failures:
         coverage_gaps.append(_missing_input_gap(kind, path, len(coverage_gaps) + 1))
+    for gap in foreign_input_gaps:
+        gap["id"] = "GAP-IN-%02d" % (len(coverage_gaps) + 1)
+        coverage_gaps.append(gap)
+    input_failures = len(required_input_failures) + len(foreign_input_gaps)
 
     assets = _read_coverage(arguments.derived)
     coverage_gaps.extend(_asset_coverage_gaps(assets, rows, len(coverage_gaps) + 1))
@@ -1017,7 +1282,7 @@ def main():
         "schema_version": "1.0",
         "register_status": "DRAFT",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
-        "engagement_id": arguments.engagement_id,
+        "engagement_id": engagement_id,
         "notice": (
             "This register is a draft derived from collected evidence. It is not a report and "
             "it is not client-facing. Every field marked ANALYST REQUIRED must be completed by "
@@ -1034,17 +1299,14 @@ def main():
             "pending": pending,
             "scoped_assets": len(assets),
             "scoped_assets_complete": sum(1 for a in assets if a.get("status") in COVERAGE_COMPLETE),
-            "required_input_failures": len(required_input_failures),
+            "required_input_failures": input_failures,
         },
         "findings": findings,
         "coverage_gaps": coverage_gaps,
         "review_queue": review_queue,
     }
 
-    os.makedirs(arguments.output, exist_ok=True)
-    path = os.path.join(arguments.output, "findings.json")
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(document, handle, indent=1)
+    path = _write_register(arguments.output, document)
 
     print("Draft findings   : %d" % len(findings))
     for finding in findings:
@@ -1063,9 +1325,12 @@ def main():
     print("Reminder         : seal the derived output after this step with "
           "python Code/SealDerived.py \"%s\" so Manifest.txt covers findings.json and the review files."
           % os.path.abspath(arguments.output))
-    if required_input_failures:
+    if input_failures:
         for kind, missing in required_input_failures:
             print("REQUIRED INPUT MISSING: --%s %s does not exist; recorded as a coverage gap." % (kind, missing))
+        for gap in foreign_input_gaps:
+            print("INPUT NOT CONVERTED: --%s %s: %s; recorded as a coverage gap."
+                  % (gap["input_kind"], gap["input_path"], gap["description"].split(". ")[0]))
         return EXIT_REQUIRED_INPUT
     return EXIT_OK
 

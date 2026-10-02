@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "engagement_id": "LAB-U1",
+  "approved_for_lab": false,
+  "approval_reference": "SET-ON-APPROVAL",
+  "targets": [
+    {
+      "asset_id": "DC01",
+      "site_id": "LAB",
+      "computer_name": "DC01",
+      "connection_name": "DC01.lab.local",
+      "transport": "Kerberos",
+      "enabled": true
+    },
+    {
+      "asset_id": "MEM01",
+      "site_id": "LAB",
+      "computer_name": "MEM01",
+      "connection_name": "MEM01.lab.local",
+      "transport": "Kerberos",
+      "enabled": true
+    },
+    {
+      "asset_id": "SRV2016",
+      "site_id": "LAB",
+      "computer_name": "SRV2016",
+      "connection_name": "SRV2016.lab.local",
+      "transport": "Kerberos",
+      "enabled": true
+    },
+    {
+      "asset_id": "SRV2019-01",
+      "site_id": "LAB",
+      "computer_name": "SRV2019-01",
+      "connection_name": "SRV2019-01.lab.local",
+      "transport": "Kerberos",
+      "enabled": true
+    }
+  ],
+  "wireless": {
+    "corporate_ssids": [
+      "CORP-WIFI"
+    ]
+  },
+  "network": {
+    "enabled": false
+  }
+}

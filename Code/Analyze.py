@@ -201,17 +201,14 @@ def load_rules(path: Path) -> dict[str, Any]:
 
 
 def validate_raw(raw: dict[str, Any], target: dict[str, Any], batch: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    if raw.get('schema_version') != '1.0' or raw.get('tool_version') != VERSION or raw.get('evidence_kind') != 'WindowsCollection':
-        raise ValueError('Unsupported host evidence schema or tool version.')
-    for key in ('asset_id', 'site_id'):
-        if raw.get(key) != target[key]:
-            raise ValueError(f'Host evidence {key} mismatch.')
-    for key in ('engagement_id', 'scope_sha256', 'collector_sha256'):
-        if raw.get(key) != batch[key]:
-            raise ValueError(f'Host evidence {key} mismatch.')
-    host = raw.get('host')
-    if not isinstance(host, dict) or str(host.get('computer_name', '')).casefold() != target['computer_name'].casefold():
-        raise ValueError('Computer identity mismatch.')
+    # Document identity (schema, engagement, asset, site, computer name, scope and
+    # collector lineage) is the shared contract in EvidenceGate, so PatchCheck and
+    # SoftwareCheck reject exactly what this module rejects. Every contradiction
+    # is reported, not only the first.
+    identity = EvidenceGate.validate_host_document(raw, target, batch)
+    if identity:
+        raise ValueError('Host evidence identity mismatch: ' + '; '.join(identity))
+    host = raw['host']
     if type(host.get('domain_role')) is not int or host['domain_role'] not in range(6):
         raise ValueError('Missing or invalid host domain role.')
     if type(host.get('is_domain_controller')) is not bool or host['is_domain_controller'] != (host['domain_role'] in (4, 5)):

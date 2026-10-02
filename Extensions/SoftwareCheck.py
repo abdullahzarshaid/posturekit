@@ -30,6 +30,13 @@ ignores Microsoft OS components and security-update (KB) entries.
 The curated catalogue below is dated and must be reviewed each quarter.  It is
 bundled so the module runs fully offline.  The optional CISA KEV overlay reuses
 the cache PatchCheck.py already populated; no new network access is introduced.
+
+A Host file is assessed only after its digest matches the ledger AND its own
+identity agrees with the ledger target (``EvidenceGate.validate_host_document``:
+schema, engagement, asset, site, computer name, scope and collector lineage). A
+contradiction is EvidenceRejected under the ledger's asset id, never assessed.
+``source_batch`` is the ledger's ``batch_id`` (the folder basename is kept as
+``source_batch_dir``); ``collector_sha256`` is recorded as the batch recorded it.
 """
 
 import argparse
@@ -279,13 +286,15 @@ def main():
     arguments = parser.parse_args()
 
     try:
-        gate = gate_hosts(arguments.batch)
+        identity, gate = gate_batch(arguments.batch)
     except ValueError as exc:
         raise SystemExit("Refusing to assess %s: %s" % (arguments.batch, exc))
     if not gate:
         raise SystemExit("No target is accounted for in %s. Nothing was collected from this "
                          "batch." % arguments.batch)
-    batch_name = os.path.basename(os.path.abspath(arguments.batch))
+    batch_dir_name = os.path.basename(os.path.abspath(arguments.batch))
+    # The batch a result came from is the ledger's batch_id, not a folder name.
+    batch_name = identity["batch_id"] or batch_dir_name
 
     kev_products = set() if arguments.no_kev else _kev_products(arguments.cache)
     kev_limitation = None
@@ -299,6 +308,10 @@ def main():
         "evidence_kind": "SoftwareRiskAssessment",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source_batch": batch_name,
+        "source_batch_dir": batch_dir_name,
+        "engagement_id": identity["engagement_id"],
+        "scope_sha256": identity["scope_sha256"],
+        "collector_sha256": identity["collector_sha256"],
         "catalog_date": CATALOG_DATE,
         "catalog_warning": CATALOG_WARNING,
         "method": ("Installed-software inventory (uninstall registry) compared against a "
@@ -335,12 +348,28 @@ def gate_hosts(batch):
     """Account for every target in the approved scope of a sealed batch.
 
     Same contract as PatchCheck.gate_hosts: one dict per approved target with
-    status Accepted (digest verified, document loaded), EvidenceRejected,
-    NotAttempted or Excluded, plus the ledger reason. A Host file on disk that
-    no accepted ledger entry covers is EvidenceRejected, never assessed.
+    status Accepted (digest verified, identity verified, document loaded),
+    EvidenceRejected, NotAttempted or Excluded, plus the ledger reason. A Host
+    file on disk that no accepted ledger entry covers is EvidenceRejected, never
+    assessed; so is a digest-consistent file whose own identity contradicts the
+    ledger target (listed under the LEDGER asset id with every contradiction).
     Raises ValueError when Batch.json or Scope.json is missing or invalid.
     """
+    return gate_batch(batch)[1]
+
+
+def gate_batch(batch):
+    """(identity, hosts): identity is the ledger's own {'batch_id', 'engagement_id',
+    'scope_sha256', 'collector_sha256', 'batch_dir'}; hosts is gate_hosts()."""
     gate = EvidenceGate.verify_batch(batch)
+    identity = {
+        "batch_id": None if gate.get("batch_id") is None else str(gate["batch_id"]),
+        "engagement_id": gate.get("engagement_id"),
+        "scope_sha256": gate.get("scope_sha256"),
+        "collector_sha256": (gate.get("batch") or {}).get("collector_sha256"),
+        "batch_dir": gate.get("batch_dir"),
+    }
+    targets = {t["asset_id"]: t for t in gate["targets"]}
     on_disk = {}
     for name in sorted(os.listdir(batch)):
         if name.startswith("Host.") and name.lower().endswith(".json"):
@@ -370,7 +399,13 @@ def gate_hosts(batch):
             if document is None:
                 record.update(status="EvidenceRejected", reason="%s could not be read" % name)
             else:
-                record.update(status="Accepted", document=document)
+                contradictions = EvidenceGate.validate_host_document(document, targets[asset_id], gate["batch"])
+                if contradictions:
+                    record.update(status="EvidenceRejected", document=document,
+                                  reason="host document identity mismatch in %s for ledger asset %s: %s"
+                                         % (name, asset_id, "; ".join(contradictions)))
+                else:
+                    record.update(status="Accepted", document=document)
         else:
             record["status"] = "NotAttempted"
             unsealed = [n for n, d in on_disk.items()
@@ -389,17 +424,22 @@ def gate_hosts(batch):
                       "document": None, "ledger_status": None,
                       "reason": "no ledger entry in Batch.json for asset %s (%s) and the asset is not in "
                                 "the approved scope" % (asset_id, name)})
-    return hosts
+    return identity, hosts
 
 
 def _unassessed(gate_host, batch_name):
     """Per-host record for a target that produced no verified inventory:
-    EvidenceRejected, NotAttempted or Excluded, with the reason. Never clean."""
+    EvidenceRejected, NotAttempted or Excluded, with the reason. Never clean.
+    Listed under the LEDGER asset id; a rejected document's own asset_id is kept
+    as document_asset_id so the contradiction stays visible."""
     status = gate_host["status"]
+    document = gate_host.get("document") if isinstance(gate_host.get("document"), dict) else {}
     result = {
         "asset_id": gate_host.get("asset_id"),
         "computer_name": gate_host.get("asset_id"),
+        "document_asset_id": document.get("asset_id"),
         "source_batch": batch_name,
+        "collector_sha256": document.get("collector_sha256"),
         "inventory_status": None,
         "status": status,
         "ledger_status": gate_host.get("ledger_status"),
@@ -463,6 +503,7 @@ def assess_host(host_document, kev_products, kev_limitation, batch_name):
         "asset_id": host_document.get("asset_id"),
         "computer_name": host.get("computer_name"),
         "source_batch": batch_name,
+        "collector_sha256": host_document.get("collector_sha256"),
         "inventory_status": source_status,
         "status": None,
         "items": [],

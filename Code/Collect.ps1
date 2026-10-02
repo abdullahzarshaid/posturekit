@@ -902,20 +902,42 @@ function Resolve-WirelessProfileList {
 
 function Resolve-EapServerValidation {
     # Namespace-aware read of an exported WLAN profile XML (exported without key=clear, so no
-    # key material is present). Returns ServerCertValidation $true / $false / $null with a
-    # basis, plus TrustedRootCount and ServerNamesPresent as separate observations.
-    #   PEAP (25) and EAP-TTLS (21): the PerformServerValidation element decides.
-    #   EAP-TLS (13): the ServerValidation block decides (user prompt disabled AND a trusted
-    #   root present -> true; user prompt allowed -> false; neither root nor names -> null).
+    # key material is present). Returns four separate observations, each with a basis:
+    #   ServerCertValidation ($true / $false / $null): decided ONLY from an explicit enablement
+    #     element. PEAP (25): MsPeapConnectionPropertiesV2 PerformServerValidation. EAP-TLS (13):
+    #     EapTlsConnectionPropertiesV2 PerformServerValidation (a child of EapType, alongside
+    #     AcceptServerName); absent means a V1 profile whose enablement is not stated -> $null.
+    #     EAP-TTLS (21): $null, because the TTLS schema has no enablement element (validation is
+    #     inherent to the TLS tunnel); its override policy and roots are still recorded.
+    #   UserOverrideAllowed ($true / $false / $null): the prompt policy, read from
+    #     DisableUserPromptForServerValidation (PEAP, EAP-TLS) or DisablePrompt (EAP-TTLS):
+    #     false -> $true (the user may accept an unexpected server), true -> $false, absent -> $null.
+    #   TrustedRootCount and ServerNamesPresent: what the ServerValidation block pins.
+    # The prompt policy is never used to decide ServerCertValidation. Microsoft's own
+    # WPA3-Enterprise TLS sample has PerformServerValidation true with
+    # DisableUserPromptForServerValidation false, so the two are independent settings.
     param([AllowNull()][string]$ProfileXml)
     function Get-XmlText([object]$Node) { if ($null -eq $Node) { return '' } return ([string]$Node.InnerText).Trim() }
     function Measure-NonEmpty([object]$Nodes) { $c = 0; if ($null -ne $Nodes) { foreach ($x in $Nodes) { if ((Get-XmlText $x) -ne '') { $c++ } } } return $c }
-    $r = [ordered]@{ ServerCertValidation=$null; ServerCertValidationBasis=$null; EapType=$null; TrustedRootCount=0; ServerNamesPresent=$false }
-    if ([string]::IsNullOrWhiteSpace($ProfileXml)) { $r.ServerCertValidationBasis = 'No profile XML was available to read.'; return [pscustomobject]$r }
+    function Read-BoolText([object]$Node) {
+        # 'true' / 'false' / $null (absent) / 'other:<text>' (present but unrecognised)
+        if ($null -eq $Node) { return $null }
+        $v = (Get-XmlText $Node).ToLowerInvariant()
+        if ($v -eq 'true' -or $v -eq 'false') { return $v }
+        return 'other:' + $v
+    }
+    $r = [ordered]@{ ServerCertValidation=$null; ServerCertValidationBasis=$null; EapType=$null; TrustedRootCount=0; ServerNamesPresent=$false;
+                     UserOverrideAllowed=$null; UserOverrideBasis=$null }
+    if ([string]::IsNullOrWhiteSpace($ProfileXml)) {
+        $r.ServerCertValidationBasis = 'No profile XML was available to read.'
+        $r.UserOverrideBasis = 'No profile XML was available to read.'
+        return [pscustomobject]$r
+    }
     $doc = New-Object System.Xml.XmlDocument
     $doc.XmlResolver = $null
     try { $doc.LoadXml($ProfileXml) } catch {
         $r.ServerCertValidationBasis = 'The profile XML could not be parsed: ' + $_.Exception.Message
+        $r.UserOverrideBasis = 'The profile XML could not be parsed.'
         return [pscustomobject]$r
     }
     $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
@@ -927,10 +949,12 @@ function Resolve-EapServerValidation {
     $ns.AddNamespace('peap',  'http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV1')
     $ns.AddNamespace('peap2', 'http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2')
     $ns.AddNamespace('tls',   'http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV1')
+    $ns.AddNamespace('tls2',  'http://www.microsoft.com/provisioning/EapTlsConnectionPropertiesV2')
     $ns.AddNamespace('ttls',  'http://www.microsoft.com/provisioning/EapTtlsConnectionPropertiesV1')
     $typeNode = $doc.SelectSingleNode('//eh:EapHostConfig/eh:EapMethod/ec:Type', $ns)
     if ($null -eq $typeNode) {
         $r.ServerCertValidationBasis = 'No EapHostConfig/EapMethod/Type element was found in the profile XML, so the EAP method could not be identified.'
+        $r.UserOverrideBasis = 'The EAP method could not be identified, so no prompt policy was read.'
         return [pscustomobject]$r
     }
     $eapType = $null
@@ -939,102 +963,88 @@ function Resolve-EapServerValidation {
     $config = $doc.SelectSingleNode('//eh:EapHostConfig/eh:Config', $ns)
     if ($null -eq $config) {
         $r.ServerCertValidationBasis = "EAP type ${eapType}: the EapHostConfig/Config element is missing, so the method configuration could not be read."
+        $r.UserOverrideBasis = "EAP type ${eapType}: the EapHostConfig/Config element is missing, so no prompt policy was read."
         return [pscustomobject]$r
     }
+    # Shared reader for the prompt policy: $ElementName under the given ServerValidation node.
+    function Set-Override([object]$Result, [object]$SvNode, [string]$ElementName, [string]$Prefix, [string]$Label) {
+        if ($null -eq $SvNode) {
+            $Result.UserOverrideBasis = "${Label}: the ServerValidation block is missing, so the $ElementName policy is not stated."
+            return
+        }
+        $node = $SvNode.SelectSingleNode("${Prefix}:$ElementName", $ns)
+        $v = Read-BoolText $node
+        if ($null -eq $v) { $Result.UserOverrideBasis = "${Label}: the $ElementName element is absent, so the prompt policy is not stated."; return }
+        if ($v -eq 'false') { $Result.UserOverrideAllowed = $true; $Result.UserOverrideBasis = "${Label}: $ElementName is false, so the user is prompted and may accept an unexpected server certificate."; return }
+        if ($v -eq 'true') { $Result.UserOverrideAllowed = $false; $Result.UserOverrideBasis = "${Label}: $ElementName is true, so the user cannot override the server-certificate check."; return }
+        $Result.UserOverrideBasis = "${Label}: $ElementName holds the unrecognised value '$($v.Substring(6))'; not determined."
+    }
     if ($eapType -eq 25) {
-        $label = 'PEAP'
+        $label = "PEAP (EAP type $eapType)"
+        $sv = $config.SelectSingleNode('.//peap:ServerValidation', $ns)
         $r.TrustedRootCount = Measure-NonEmpty ($config.SelectNodes('.//peap:ServerValidation/peap:TrustedRootCA', $ns))
         $snNode = $config.SelectSingleNode('.//peap:ServerValidation/peap:ServerNames', $ns)
-        $psv = $config.SelectSingleNode('.//peap2:PerformServerValidation', $ns)
         $r.ServerNamesPresent = ((Get-XmlText $snNode) -ne '')
+        Set-Override $r $sv 'DisableUserPromptForServerValidation' 'peap' $label
+        $psv = $config.SelectSingleNode('.//peap2:PerformServerValidation', $ns)
         if ($null -eq $psv) {
             # Tolerate the element in an unexpected namespace, but say so in the basis.
             $psv = $config.SelectSingleNode(".//*[local-name()='PerformServerValidation']")
             $nsNote = if ($null -ne $psv) { ' (element found outside its documented namespace)' } else { '' }
         } else { $nsNote = '' }
         if ($null -eq $psv) {
-            $r.ServerCertValidationBasis = "$label (EAP type $eapType): the PerformServerValidation element is missing from the profile, so the server-certificate validation setting is not determined."
+            $r.ServerCertValidationBasis = "${label}: the PerformServerValidation element is missing from the profile, so the server-certificate validation setting is not determined."
             return [pscustomobject]$r
         }
         $v = (Get-XmlText $psv).ToLowerInvariant()
-        if ($v -eq 'true') { $r.ServerCertValidation = $true; $r.ServerCertValidationBasis = "$label (EAP type $eapType): PerformServerValidation is true$nsNote." }
-        elseif ($v -eq 'false') { $r.ServerCertValidation = $false; $r.ServerCertValidationBasis = "$label (EAP type $eapType): PerformServerValidation is false$nsNote; the authentication server certificate is not validated." }
-        else { $r.ServerCertValidationBasis = "$label (EAP type $eapType): PerformServerValidation holds the unrecognised value '$v'; not determined." }
+        if ($v -eq 'true') { $r.ServerCertValidation = $true; $r.ServerCertValidationBasis = "${label}: PerformServerValidation is true$nsNote." }
+        elseif ($v -eq 'false') { $r.ServerCertValidation = $false; $r.ServerCertValidationBasis = "${label}: PerformServerValidation is false$nsNote; the authentication server certificate is not validated." }
+        else { $r.ServerCertValidationBasis = "${label}: PerformServerValidation holds the unrecognised value '$v'; not determined." }
         return [pscustomobject]$r
     }
     if ($eapType -eq 21) {
-        # EAP-TTLS is judged from its own ServerValidation block (EapTtlsConnectionPropertiesV1):
-        # DisablePrompt true means the user is not prompted and validation is enforced;
-        # TrustedRootCAHash entries name the pinned roots.
+        # EAP-TTLS (EapTtlsConnectionPropertiesV1) has no enablement element: the TLS tunnel
+        # always authenticates the server. What is recorded is the override policy (DisablePrompt)
+        # and the pinned roots (TrustedRootCAHash) and server names.
+        $label = 'EAP-TTLS (EAP type 21)'
         $sv = $config.SelectSingleNode('.//ttls:ServerValidation', $ns)
-        if ($null -eq $sv) {
-            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): the ServerValidation block is missing from the profile, so the server-certificate validation setting is not determined.'
-            return [pscustomobject]$r
-        }
-        $r.TrustedRootCount = Measure-NonEmpty ($sv.SelectNodes('ttls:TrustedRootCAHash', $ns))
-        $snNode = $sv.SelectSingleNode('ttls:ServerNames', $ns)
-        $r.ServerNamesPresent = ((Get-XmlText $snNode) -ne '')
-        $promptNode = $sv.SelectSingleNode('ttls:DisablePrompt', $ns)
-        $prompt = if ($null -eq $promptNode) { $null } else { (Get-XmlText $promptNode).ToLowerInvariant() }
-        if ($prompt -eq 'false') {
-            $r.ServerCertValidation = $false
-            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): DisablePrompt is false, so the user can accept any server certificate.'
-            return [pscustomobject]$r
-        }
-        if ($r.TrustedRootCount -eq 0 -and -not $r.ServerNamesPresent) {
-            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): the ServerValidation block names no trusted root CA hash and no server names, so what the client would validate against is not determined.'
-            return [pscustomobject]$r
-        }
-        if ($prompt -eq 'true' -and $r.TrustedRootCount -ge 1) {
-            $r.ServerCertValidation = $true
-            $r.ServerCertValidationBasis = "EAP-TTLS (EAP type 21): DisablePrompt is true and $($r.TrustedRootCount) trusted root CA hash(es) are pinned."
-            return [pscustomobject]$r
-        }
-        if ($null -eq $prompt) {
-            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): the DisablePrompt element is missing from the ServerValidation block; not determined.'
-        } elseif ($prompt -eq 'true') {
-            $r.ServerCertValidationBasis = 'EAP-TTLS (EAP type 21): DisablePrompt is true but no trusted root CA hash is pinned (server names only), so validation against a trusted root is not determined.'
-        } else {
-            $r.ServerCertValidationBasis = "EAP-TTLS (EAP type 21): DisablePrompt holds the unrecognised value '$prompt'; not determined."
+        $r.ServerCertValidationBasis = "${label}: TTLS has no enablement element; server validation is inherent to the TLS tunnel, so no enablement setting is read. The prompt policy and pinned roots are recorded separately."
+        Set-Override $r $sv 'DisablePrompt' 'ttls' $label
+        if ($null -ne $sv) {
+            $r.TrustedRootCount = Measure-NonEmpty ($sv.SelectNodes('ttls:TrustedRootCAHash', $ns))
+            $snNode = $sv.SelectSingleNode('ttls:ServerNames', $ns)
+            $r.ServerNamesPresent = ((Get-XmlText $snNode) -ne '')
         }
         return [pscustomobject]$r
     }
     if ($eapType -eq 13) {
+        $label = 'EAP-TLS (EAP type 13)'
+        $eapTypeNode = $config.SelectSingleNode('.//tls:EapType', $ns)
         $sv = $config.SelectSingleNode('.//tls:EapType/tls:ServerValidation', $ns)
         if ($null -eq $sv) { $sv = $config.SelectSingleNode('.//tls:ServerValidation', $ns) }
-        if ($null -eq $sv) {
-            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): the ServerValidation block is missing from the profile, so the server-certificate validation setting is not determined.'
+        if ($null -ne $sv) {
+            $r.TrustedRootCount = Measure-NonEmpty ($sv.SelectNodes('tls:TrustedRootCA', $ns))
+            $snNode = $sv.SelectSingleNode('tls:ServerNames', $ns)
+            $r.ServerNamesPresent = ((Get-XmlText $snNode) -ne '')
+        }
+        Set-Override $r $sv 'DisableUserPromptForServerValidation' 'tls' $label
+        # Enablement: the V2 PerformServerValidation element, a child of EapType (V1 namespace)
+        # in the EapTlsConnectionPropertiesV2 namespace, next to AcceptServerName.
+        $psv = $null
+        if ($null -ne $eapTypeNode) { $psv = $eapTypeNode.SelectSingleNode('tls2:PerformServerValidation', $ns) }
+        if ($null -eq $psv) { $psv = $config.SelectSingleNode('.//tls2:PerformServerValidation', $ns) }
+        if ($null -eq $psv) {
+            $r.ServerCertValidationBasis = "${label}: V1 profile, enablement not stated (no EapTlsConnectionPropertiesV2 PerformServerValidation element), so the server-certificate validation setting is not determined."
             return [pscustomobject]$r
         }
-        $r.TrustedRootCount = Measure-NonEmpty ($sv.SelectNodes('tls:TrustedRootCA', $ns))
-        $snNode = $sv.SelectSingleNode('tls:ServerNames', $ns)
-        $r.ServerNamesPresent = ((Get-XmlText $snNode) -ne '')
-        $promptNode = $sv.SelectSingleNode('tls:DisableUserPromptForServerValidation', $ns)
-        $prompt = if ($null -eq $promptNode) { $null } else { (Get-XmlText $promptNode).ToLowerInvariant() }
-        if ($prompt -eq 'false') {
-            $r.ServerCertValidation = $false
-            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): DisableUserPromptForServerValidation is false, so the user can accept any server certificate.'
-            return [pscustomobject]$r
-        }
-        if ($r.TrustedRootCount -eq 0 -and -not $r.ServerNamesPresent) {
-            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): the ServerValidation block names no trusted root CA and no server names, so what the client would validate against is not determined.'
-            return [pscustomobject]$r
-        }
-        if ($prompt -eq 'true' -and $r.TrustedRootCount -ge 1) {
-            $r.ServerCertValidation = $true
-            $r.ServerCertValidationBasis = "EAP-TLS (EAP type 13): DisableUserPromptForServerValidation is true and $($r.TrustedRootCount) trusted root CA thumbprint(s) are pinned."
-            return [pscustomobject]$r
-        }
-        if ($null -eq $prompt) {
-            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): the DisableUserPromptForServerValidation element is missing from the ServerValidation block; not determined.'
-        } elseif ($prompt -eq 'true') {
-            $r.ServerCertValidationBasis = 'EAP-TLS (EAP type 13): DisableUserPromptForServerValidation is true but no trusted root CA is pinned (server names only), so validation against a trusted root is not determined.'
-        } else {
-            $r.ServerCertValidationBasis = "EAP-TLS (EAP type 13): DisableUserPromptForServerValidation holds the unrecognised value '$prompt'; not determined."
-        }
+        $v = Read-BoolText $psv
+        if ($v -eq 'true') { $r.ServerCertValidation = $true; $r.ServerCertValidationBasis = "${label}: PerformServerValidation (V2) is true." }
+        elseif ($v -eq 'false') { $r.ServerCertValidation = $false; $r.ServerCertValidationBasis = "${label}: PerformServerValidation (V2) is false; the authentication server certificate is not validated." }
+        else { $r.ServerCertValidationBasis = "${label}: PerformServerValidation (V2) holds the unrecognised value '$($v.Substring(6))'; not determined." }
         return [pscustomobject]$r
     }
     $r.ServerCertValidationBasis = "EAP type $(if ($null -eq $eapType) { '(unreadable)' } else { $eapType }) has no server-certificate validation rule in this collector; not determined."
+    $r.UserOverrideBasis = "EAP type $(if ($null -eq $eapType) { '(unreadable)' } else { $eapType }) has no prompt-policy rule in this collector; not determined."
     return [pscustomobject]$r
 }
 
@@ -1108,8 +1118,11 @@ function Resolve-EnterpriseValidationCounts {
     # Counts over the 802.1X profiles: NoValidation counts only ServerCertValidation exactly
     # $false; Unknown counts $null. When Unknown is above zero and no profile is known-false,
     # NoValidation is emitted as $null so the WLAN04 rule records Unknown rather than Pass.
+    # UserOverrideAllowedCount counts the 802.1X profiles whose UserOverrideAllowed is exactly
+    # $true (the prompt policy lets the user accept an unexpected server); it is a separate
+    # observation and never feeds the validation counts.
     param([AllowNull()][object[]]$Profiles)
-    $ent = 0; $noVal = 0; $unknown = 0
+    $ent = 0; $noVal = 0; $unknown = 0; $override = 0
     if ($null -ne $Profiles) {
         foreach ($p in $Profiles) {
             $dot1x = $false
@@ -1120,10 +1133,14 @@ function Resolve-EnterpriseValidationCounts {
             if ($p.PSObject.Properties['ServerCertValidation']) { $v = $p.ServerCertValidation }
             if ($null -eq $v) { $unknown++ }
             elseif ($v -is [bool] -and $v -eq $false) { $noVal++ }
+            $o = $null
+            if ($p.PSObject.Properties['UserOverrideAllowed']) { $o = $p.UserOverrideAllowed }
+            if ($o -is [bool] -and $o -eq $true) { $override++ }
         }
     }
     $emit = if ($unknown -gt 0 -and $noVal -eq 0) { $null } else { $noVal }
-    return [pscustomobject]@{ EnterpriseNetworkCount=$ent; EnterpriseNoServerValidationCount=$emit; EnterpriseServerValidationUnknownCount=$unknown; KnownNoValidation=$noVal }
+    return [pscustomobject]@{ EnterpriseNetworkCount=$ent; EnterpriseNoServerValidationCount=$emit; EnterpriseServerValidationUnknownCount=$unknown;
+                              EnterpriseUserOverrideAllowedCount=$override; KnownNoValidation=$noVal }
 }
 
 function Resolve-OpenNetworkCounts {
@@ -1152,10 +1169,125 @@ function Resolve-OpenNetworkCounts {
     return [pscustomobject]@{ OpenNetworkCount=$emitOpen; OpenAutoConnectCount=$emitAuto; UnreadableProfileCount=$unreadable.Count;
                               UnreadableProfileNames=@($unreadable.ToArray()); KnownOpen=$open; KnownOpenAuto=$openAuto }
 }
+
+function Resolve-WirelessPosture {
+    # The aggregate posture record used by the WLAN rules, built from already-collected inputs.
+    #   Profiles        : the saved-profile records (Name, Authentication, Cipher, ConnectionMode,
+    #                     Dot1X, ServerCertValidation, UserOverrideAllowed). Ignored when the
+    #                     inventory status is Error.
+    #   InventoryStatus : 'Collected' when the profile list was enumerated and every profile was
+    #                     read, 'Partial' when the list was enumerated but one or more profiles
+    #                     could not be read, 'Error' when the list itself could not be enumerated
+    #                     or understood. A 'Collected' status is downgraded to 'Partial' here when
+    #                     the profile records themselves show an unreadable profile.
+    #   InventoryBasis  : the enumeration basis or error text, repeated as ProfileInventoryBasis.
+    #   Interface       : the netsh wlan show interfaces record (State, Authentication, AkmSuite)
+    #                     or $null; it is independent of the profile inventory.
+    #   CorporateSsids  : the corporate SSID list or $null.
+    #   Presence        : the Resolve-WirelessPresence record (Present, Basis) or $null.
+    # Rule: an Error inventory emits every profile-derived count as $null, so the WLAN rules that
+    # read them record Unknown instead of a false Pass; connection-derived fields stay as observed.
+    # A Partial inventory keeps every known-bad count (a known open or legacy profile is still a
+    # Fail) but emits a "clean" conclusion (count 0) as $null, because an unread profile could
+    # have been the bad one. A Collected inventory emits plain integers, zeros included.
+    param([AllowNull()][object[]]$Profiles, [string]$InventoryStatus, [AllowNull()][string]$InventoryBasis,
+          [AllowNull()][object]$Interface, [AllowNull()][string[]]$CorporateSsids,
+          [AllowNull()][object]$Presence, [AllowNull()][string]$CorporateSsidSource)
+    # Local copy under a distinct name (variable names are case-insensitive, so a local named
+    # "profiles" would overwrite the $Profiles parameter). Assigned in two steps: "$x = if (...) { @() }" would
+    # leave $x as $null, and piping $null into Where-Object sends one $null item that StrictMode
+    # then rejects on property access.
+    $list = @()
+    if ($null -ne $Profiles) { $list = @($Profiles) }
+    $status = if ([string]::IsNullOrWhiteSpace($InventoryStatus)) { 'Error' } else { $InventoryStatus.Trim() }
+    if ($status -notin @('Collected', 'Partial', 'Error')) { $status = 'Error' }
+    $basis = if ([string]::IsNullOrWhiteSpace($InventoryBasis)) { $null } else { $InventoryBasis }
+    # Connection-derived observations: independent of the profile inventory.
+    $connOk = $null; $connPmf = $null; $connPmfBasis = $null
+    if ($null -ne $Interface -and $Interface.PSObject.Properties['State'] -and (Test-WlanConnected $Interface.State)) {
+        $auth = ''
+        if ($Interface.PSObject.Properties['Authentication'] -and $null -ne $Interface.Authentication) { $auth = [string]$Interface.Authentication }
+        $connOk = [bool]($auth -match 'WPA2|WPA3')
+        $akm = $null
+        if ($Interface.PSObject.Properties['AkmSuite']) { $akm = $Interface.AkmSuite }
+        $pmf = Resolve-Pmf $akm
+        $connPmf = $pmf.Pmf; $connPmfBasis = $pmf.Basis
+    } elseif ($null -ne $Interface) {
+        $connPmfBasis = 'The wireless interface is not associated (State is not "connected"), so no negotiated AKM suite exists to evaluate.'
+    } else {
+        $connPmfBasis = 'No wireless interface detail was read, so no negotiated AKM suite exists to evaluate.'
+    }
+    $present = $null; $presenceBasis = $null
+    if ($null -ne $Presence) {
+        if ($Presence.PSObject.Properties['Present']) { $present = $Presence.Present }
+        if ($Presence.PSObject.Properties['Basis']) { $presenceBasis = $Presence.Basis }
+    }
+    $r = [ordered]@{
+        WirelessPresent=$present
+        WirelessPresenceBasis=$presenceBasis
+        ProfileInventoryStatus=$status
+        ProfileInventoryBasis=$basis
+        ProfilesTotal=$null
+        OpenNetworkCount=$null
+        OpenAutoConnectCount=$null
+        UnreadableProfileCount=$null
+        UnreadableProfileNames=@()
+        LegacyEncryptionCount=$null
+        TkipCipherCount=$null
+        EnterpriseNetworkCount=$null
+        EnterpriseNoServerValidationCount=$null
+        EnterpriseServerValidationUnknownCount=$null
+        EnterpriseUserOverrideAllowedCount=$null
+        PskNetworkCount=$null
+        CorporatePskNetworkCount=$null
+        CorporateSsidSource=$CorporateSsidSource
+        ConnectedAuthWpa2OrBetter=$connOk
+        ConnectedManagementFrameProtection=$connPmf
+        ConnectedPmfBasis=$connPmfBasis
+    }
+    if ($status -eq 'Error') {
+        if ($null -eq $r.ProfileInventoryBasis) { $r.ProfileInventoryBasis = 'The saved profile list could not be enumerated; every profile-derived count is null.' }
+        return [pscustomobject]$r
+    }
+    $openCounts = Resolve-OpenNetworkCounts $list
+    $unreadable = [int]$openCounts.UnreadableProfileCount
+    if ($unreadable -gt 0 -and $status -eq 'Collected') { $status = 'Partial' }
+    if ($status -eq 'Partial' -and $unreadable -gt 0) {
+        $note = "$unreadable profile(s) could not be read (" + (@($openCounts.UnreadableProfileNames) -join ', ') + '); counts that would otherwise conclude "clean" are null.'
+        $r.ProfileInventoryBasis = if ($null -eq $basis) { $note } else { $basis + ' ' + $note }
+    } elseif ($status -eq 'Partial') {
+        $r.ProfileInventoryBasis = if ($null -eq $basis) { 'The profile inventory is partial; counts that would otherwise conclude "clean" are null.' } else { $basis }
+    }
+    $r.ProfileInventoryStatus = $status
+    $legacy = @($list | Where-Object { ($_.Authentication -match 'WPA-') -or ($_.Authentication -match 'WEP') -or ($_.Cipher -match 'WEP') })
+    $tkip = @($list | Where-Object { $_.Cipher -match 'TKIP' })
+    $entCounts = Resolve-EnterpriseValidationCounts $list
+    $psk = @($list | Where-Object { $_.Authentication -match 'Personal' })
+    $corp = Get-CorporatePskCount $list $CorporateSsids
+    # A count of zero is only a conclusion when every profile was read.
+    function Set-CleanCount([object]$Value) { if ($status -eq 'Partial' -and $null -ne $Value -and [int]$Value -eq 0) { return $null } return $Value }
+    $r.ProfilesTotal = $list.Count
+    $r.OpenNetworkCount = Set-CleanCount $openCounts.OpenNetworkCount
+    $r.OpenAutoConnectCount = Set-CleanCount $openCounts.OpenAutoConnectCount
+    $r.UnreadableProfileCount = $unreadable
+    $r.UnreadableProfileNames = @($openCounts.UnreadableProfileNames)
+    $r.LegacyEncryptionCount = Set-CleanCount $legacy.Count
+    $r.TkipCipherCount = Set-CleanCount $tkip.Count
+    $r.EnterpriseNetworkCount = $entCounts.EnterpriseNetworkCount
+    $r.EnterpriseNoServerValidationCount = Set-CleanCount $entCounts.EnterpriseNoServerValidationCount
+    $r.EnterpriseServerValidationUnknownCount = $entCounts.EnterpriseServerValidationUnknownCount
+    $r.EnterpriseUserOverrideAllowedCount = $entCounts.EnterpriseUserOverrideAllowedCount
+    $r.PskNetworkCount = $psk.Count
+    $r.CorporatePskNetworkCount = Set-CleanCount $corp
+    return [pscustomobject]$r
+}
 # ---- END WIRELESS HELPERS ----
 
 $wlanPresence = $null; $wlanIface = $null; $wlanProfiles = @(); $wlanAdapter = $null
 $wlanProfilesStatus = 'NotAttempted'; $wlanProfilesError = $null; $wlanProfileListBasis = $null
+# Inventory status carried into the posture: 'Collected' (list enumerated, every profile read),
+# 'Partial' (list enumerated, one or more profiles unreadable) or 'Error' (list not enumerated).
+$wlanInventoryStatus = 'Error'; $wlanInventoryBasis = $null
 # Corporate SSID list (semicolon separated). Precedence: the collector parameter filled by
 # Run.ps1 (from the scope document or its -CorporateSsids switch), then the POSTUREKIT_CORPORATE_SSIDS
 # environment variable (Local mode only; it does not cross WinRM), else null, in which case no
@@ -1200,6 +1332,9 @@ if ($wlanPresence.Present -eq 1) {
 if ($null -ne $wlanPresence.Present -and $wlanPresence.Present -eq 0) {
     $wlanProfilesStatus = 'Skipped'
     $wlanProfileListBasis = 'Profile enumeration not attempted: ' + $wlanPresence.Basis
+    # No adapter: an empty inventory is the true state, so the counts are genuine zeros. The
+    # WLAN rules are gated off WirelessPresent 0 anyway.
+    $wlanInventoryStatus = 'Collected'; $wlanInventoryBasis = $wlanProfileListBasis
 } else {
     # Attempted whenever presence is 1 or undetermined, so a failed or non-understood
     # enumeration is recorded as an Error on the wirelessprofiles source, never as an
@@ -1212,7 +1347,8 @@ if ($null -ne $wlanPresence.Present -and $wlanPresence.Present -eq 0) {
         foreach ($n in $list.Names) {
             $p = (& netsh wlan show profile name="$n" 2>&1 | Out-String)
             $onex = [bool]($p -match '(?im)802\.1X\s*:\s*Enabled')
-            $eap = [pscustomobject]@{ ServerCertValidation=$null; ServerCertValidationBasis='Not an 802.1X profile.'; EapType=$null; TrustedRootCount=$null; ServerNamesPresent=$null }
+            $eap = [pscustomobject]@{ ServerCertValidation=$null; ServerCertValidationBasis='Not an 802.1X profile.'; EapType=$null; TrustedRootCount=$null; ServerNamesPresent=$null;
+                                      UserOverrideAllowed=$null; UserOverrideBasis='Not an 802.1X profile.' }
             if ($onex) {
                 $xt = $null
                 try {
@@ -1228,10 +1364,17 @@ if ($null -ne $wlanPresence.Present -and $wlanPresence.Present -eq 0) {
             $wlanProfiles += [pscustomobject]@{ Name=$n; ProfileScope='AllUser'; Authentication=(Get-NetshField $p 'Authentication');
                 Cipher=(Get-NetshField $p 'Cipher'); ConnectionMode=(Get-NetshField $p 'Connection mode');
                 Dot1X=$onex; ServerCertValidation=$eap.ServerCertValidation; ServerCertValidationBasis=$eap.ServerCertValidationBasis;
+                UserOverrideAllowed=$eap.UserOverrideAllowed; UserOverrideBasis=$eap.UserOverrideBasis;
                 TrustedRootCount=$eap.TrustedRootCount; ServerNamesPresent=$eap.ServerNamesPresent }
         }
         $wlanProfilesStatus = 'Collected'
-    } catch { $wlanProfilesStatus = 'Error'; $wlanProfilesError = $_.Exception.Message; $wlanProfiles = @() }
+        # The list was enumerated. Resolve-WirelessPosture downgrades this to Partial when any
+        # profile record has no readable Authentication (netsh could not show that profile).
+        $wlanInventoryStatus = 'Collected'; $wlanInventoryBasis = $wlanProfileListBasis
+    } catch {
+        $wlanProfilesStatus = 'Error'; $wlanProfilesError = $_.Exception.Message; $wlanProfiles = @()
+        $wlanInventoryStatus = 'Error'; $wlanInventoryBasis = $wlanProfilesError
+    }
 }
 } finally {
     # End of the netsh wlan calls: restore the console encoding that was in force before.
@@ -1247,44 +1390,11 @@ Capture 'wirelessinterface' @('netsh') {
 Capture 'wirelessprofiles' @('netsh') {
     if ($wlanProfilesStatus -eq 'Error') { throw $wlanProfilesError }
     $wlanProfiles
-} 'Saved all-user wireless profiles (ProfileScope AllUser) with their authentication, cipher, auto-connect mode, 802.1X flag and the server-certificate validation read from the exported profile XML. Per-user profiles are not read. Pre-shared keys are never read or exported. Recorded as an Error when the profile list could not be enumerated or understood.'
+} 'Saved all-user wireless profiles (ProfileScope AllUser) with their authentication, cipher, auto-connect mode, 802.1X flag, and from the exported profile XML the server-certificate validation enablement (ServerCertValidation, from the PerformServerValidation element only) and the prompt policy (UserOverrideAllowed, true when the user may accept an unexpected server) as separate observations. Per-user profiles are not read. Pre-shared keys are never read or exported. Recorded as an Error when the profile list could not be enumerated or understood; the wirelessposture record then carries ProfileInventoryStatus Error.'
 Capture 'wirelessposture' @('netsh') {
-    $openCounts = Resolve-OpenNetworkCounts $wlanProfiles
-    $legacy=@($wlanProfiles | Where-Object { ($_.Authentication -match 'WPA-') -or ($_.Authentication -match 'WEP') -or ($_.Cipher -match 'WEP') })
-    $tkip=@($wlanProfiles | Where-Object { $_.Cipher -match 'TKIP' })
-    $entCounts = Resolve-EnterpriseValidationCounts $wlanProfiles
-    $psk=@($wlanProfiles | Where-Object { $_.Authentication -match 'Personal' })
-    $connOk=$null; $connPmf=$null; $connPmfBasis=$null
-    if ($wlanIface -and (Test-WlanConnected $wlanIface.State)) {
-        $connOk=[bool]($wlanIface.Authentication -match 'WPA2|WPA3')
-        $pmf = Resolve-Pmf $wlanIface.AkmSuite
-        $connPmf = $pmf.Pmf; $connPmfBasis = $pmf.Basis
-    } elseif ($wlanIface) {
-        $connPmfBasis = 'The wireless interface is not associated (State is not "connected"), so no negotiated AKM suite exists to evaluate.'
-    } else {
-        $connPmfBasis = 'No wireless interface detail was read, so no negotiated AKM suite exists to evaluate.'
-    }
-    [pscustomobject]@{
-        WirelessPresent=$wlanPresence.Present
-        WirelessPresenceBasis=$wlanPresence.Basis
-        ProfilesTotal=@($wlanProfiles).Count
-        OpenNetworkCount=$openCounts.OpenNetworkCount
-        OpenAutoConnectCount=$openCounts.OpenAutoConnectCount
-        UnreadableProfileCount=$openCounts.UnreadableProfileCount
-        UnreadableProfileNames=@($openCounts.UnreadableProfileNames)
-        LegacyEncryptionCount=$legacy.Count
-        TkipCipherCount=$tkip.Count
-        EnterpriseNetworkCount=$entCounts.EnterpriseNetworkCount
-        EnterpriseNoServerValidationCount=$entCounts.EnterpriseNoServerValidationCount
-        EnterpriseServerValidationUnknownCount=$entCounts.EnterpriseServerValidationUnknownCount
-        PskNetworkCount=$psk.Count
-        CorporatePskNetworkCount=(Get-CorporatePskCount $wlanProfiles $wlanCorporateSsids)
-        CorporateSsidSource=$wlanCorporateSsidSource
-        ConnectedAuthWpa2OrBetter=$connOk
-        ConnectedManagementFrameProtection=$connPmf
-        ConnectedPmfBasis=$connPmfBasis
-    }
-} 'Aggregated host-side wireless posture used by the WLAN rules. WirelessPresent is 1 when netsh reports an interface, 0 when netsh reports none and no 802.11 adapter is listed, and null otherwise (another display language, service not running, access denied); WirelessPresenceBasis states which. A null value makes the wireless rules record Unknown. A profile whose authentication could not be read is counted in UnreadableProfileCount, never as Open; when any profile is unreadable and none is known to be open, OpenNetworkCount and OpenAutoConnectCount are null. EnterpriseNoServerValidationCount is null when some 802.1X profile could not be classified and none is known to skip validation. CorporatePskNetworkCount is null when no corporate SSID list was supplied. ConnectedManagementFrameProtection is true only when the negotiated AKM suite mandates it and null otherwise. Over-the-air, rogue-AP and evil-twin testing require a monitor-mode adapter and physical presence, and are a separate layer.'
+    Resolve-WirelessPosture -Profiles $wlanProfiles -InventoryStatus $wlanInventoryStatus -InventoryBasis $wlanInventoryBasis `
+        -Interface $wlanIface -CorporateSsids $wlanCorporateSsids -Presence $wlanPresence -CorporateSsidSource $wlanCorporateSsidSource
+} 'Aggregated host-side wireless posture used by the WLAN rules. WirelessPresent is 1 when netsh reports an interface, 0 when netsh reports none and no 802.11 adapter is listed, and null otherwise (another display language, service not running, access denied); WirelessPresenceBasis states which. A null value makes the wireless rules record Unknown. ProfileInventoryStatus is Collected when the saved profile list was enumerated and every profile read, Partial when one or more profiles could not be read, and Error when the list could not be enumerated or understood; ProfileInventoryBasis states why. When it is Error every profile-derived count (ProfilesTotal, the open, legacy, TKIP, enterprise, PSK and unreadable counts) is null so the profile rules record Unknown; the connection-derived fields are still observed. When it is Partial a known-bad count is kept but a count of zero is emitted as null, because an unread profile could have been the bad one. A profile whose authentication could not be read is counted in UnreadableProfileCount, never as Open. EnterpriseNoServerValidationCount counts 802.1X profiles whose enablement element states that the server certificate is not validated; EnterpriseServerValidationUnknownCount counts those whose profile states no enablement (EAP-TLS V1 profiles, EAP-TTLS); EnterpriseUserOverrideAllowedCount counts those whose prompt policy lets the user accept an unexpected server. CorporatePskNetworkCount is null when no corporate SSID list was supplied. ConnectedManagementFrameProtection is true only when the negotiated AKM suite mandates it and null otherwise. Over-the-air, rogue-AP and evil-twin testing require a monitor-mode adapter and physical presence, and are a separate layer.'
 
 $complete=@($records | Where-Object { $_.status -notin @('Collected','NotApplicable') }).Count -eq 0
 $coverage=if ($complete) {'Complete'} else {'Partial'}

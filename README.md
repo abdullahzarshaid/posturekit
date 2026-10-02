@@ -4,7 +4,7 @@
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Tests](https://img.shields.io/badge/tests-182%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-200%20passing-brightgreen.svg)
 ![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
 **Evidence-first, credentialed Windows and network security posture assessment.**
@@ -62,7 +62,9 @@ evidence trail. PostureKit is deliberately the opposite:
    confirms nothing changed.
 3. **Analyze**: `Code/Analyze.py` evaluates one or more batches against `Code/Rules.json` and writes a
    normalized evidence set (`Evidence.json`, `Tests.csv`, `Summary.html`). Importers in `Extensions/`
-   add the other planes.
+   add the other planes. `Extensions/ToFindings.py` verifies the analyzer output folder's manifest before it
+   reads anything; a folder that fails the check yields a register with no findings, status `InputRejected`
+   and exit code 2.
 
 Every result carries the control it relates to (NIST SP 800-53 references), the evidence pointer and its
 hash, the method, and the outcome.
@@ -96,7 +98,9 @@ These tests use synthetic fixtures and do not contact hosts. Actual collection b
 a reviewed scope file and authorization; use an asset identifier declared in that scope.
 
 ```powershell
-# 1. Describe the target(s) in a scope file (see Code/ScopeWorkgroup.example.json).
+# 1. Describe the target(s) in a scope file (see Code/ScopeWorkgroup.example.json; the three
+#    Code/ScopeU1*.example.json files show a central domain run, a workgroup host and a
+#    non-English host under one engagement with a corporate SSID list).
 # 2. Collect locally on the host:
 powershell -ExecutionPolicy Bypass -File Code\Run.ps1 -ScopePath scope.json -Mode Local -AssetId HOST01 -AuthorizedLabRun
 ```
@@ -157,13 +161,13 @@ are the pattern to copy for a new one.
 python Code/Tests.py
 ```
 
-The Python suite (182 tests) runs on synthetic data only: no PowerShell is executed and no host is contacted.
+The Python suite (200 tests) runs on synthetic data only: no PowerShell is executed and no host is contacted.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File Code\CollectorHelperTests.ps1
 ```
 
-The PowerShell fixture suite (79 checks) loads the pure wireless helpers out of `Collect.ps1` and runs them
+The PowerShell fixture suite (97 checks) loads the pure wireless helpers out of `Collect.ps1` and runs them
 against fixture text. It needs Windows PowerShell 5.1 but no wireless adapter, no `netsh` call and no key.
 
 ## Contributing

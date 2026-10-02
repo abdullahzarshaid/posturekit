@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "engagement_id": "LAB-U1",
+  "approved_for_lab": false,
+  "approval_reference": "SET-ON-APPROVAL",
+  "targets": [
+    {
+      "asset_id": "CLI01",
+      "site_id": "LAB",
+      "computer_name": "CLI01",
+      "connection_name": "CLI01.lab.local",
+      "transport": "Kerberos",
+      "enabled": true
+    }
+  ],
+  "wireless": {
+    "corporate_ssids": [
+      "CORP-WIFI"
+    ]
+  },
+  "network": {
+    "enabled": false
+  }
+}

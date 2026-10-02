@@ -2,6 +2,28 @@
 
 All notable changes to PostureKit. The schema version of the evidence files is unchanged (1.0), so batches collected with earlier 0.6 builds still analyze.
 
+## 0.6, build 2026-10-02 release candidate 3
+
+Corrections from an independent delta review of release candidate 2. The Python suite is now 200 tests and the PowerShell fixture suite (`Code/CollectorHelperTests.ps1`) 97 checks. Schema version 1.0, tool version 0.6, the 45 sources and the 45 rules are unchanged; batches collected with earlier 0.6 builds still verify and report their own collector version.
+
+### Input verification at the findings bridge (`Extensions/ToFindings.py`)
+- The derived folder's `Manifest.txt` is verified (every listed file present, SHA-256 equal, nothing unmanifested) before `Tests.csv`, `Coverage.csv` or `Evidence.json` is read. A failed check writes a register with no findings and one GAP-IN entry, sets `register_status` to `InputRejected` and exits 2. A `Tests.csv` whose Fail rows were edited to Pass is therefore rejected instead of being converted to zero findings; sealing an output never substitutes for verifying its input.
+- Patch and software outputs must name the batch they came from (`source_batch`, the verified batch id) and, when `Evidence.json` lists the analysed batches, must belong to one of them; otherwise a GAP-IN is recorded, no finding is emitted and the run exits 4. An `--engagement-id` that contradicts `Evidence.json` is rejected.
+
+### Host-document identity (`Code/EvidenceGate.py`)
+- `validate_host_document` checks schema, tool version, evidence kind, engagement, asset and site against the ledger, the computer name, the scope digest and the batch's own recorded collector hash. The lineage check stays inside the batch and is never compared with the current release. `Analyze.py`, `PatchCheck.py` and `SoftwareCheck.py` all use it: a digest-consistent document whose embedded identity contradicts the ledger is EvidenceRejected under the ledger asset id in all three and is never assessed. `collector_sha256` is recorded per host in the patch and software outputs.
+
+### Collector, profile inventory and EAP validation (`Code/Collect.ps1`)
+- `wirelessposture` carries `ProfileInventoryStatus` (Collected, Partial, Error) and `ProfileInventoryBasis`. On Error every profile-derived count is null, so WLAN01, WLAN02, WLAN03, WLAN04, WLAN06 and WLAN07 record Unknown while the connection facts (WLAN05, WLAN08) are kept. On Partial, known-bad counts stay (an open or legacy profile is still a Fail) and clean conclusions are null. The failure branch was reproduced end to end under Windows PowerShell 5.1 with a `netsh` wrapper that fails the profile listing. The posture is built by one pure helper, fixture-tested.
+- `ServerCertValidation` is decided only from an explicit enablement element: PEAP `PerformServerValidation`; EAP-TLS the V2 `PerformServerValidation` (absent on a V1 profile gives null with the basis stated); EAP-TTLS always null, because the schema has no enablement element. `UserOverrideAllowed` is a separate observation (`DisableUserPromptForServerValidation` or `DisablePrompt`), with `EnterpriseUserOverrideAllowedCount` in the posture. Microsoft's published WPA3-Enterprise TLS sample profile is a fixture and reads validation true with the override allowed. Earlier fixtures that equated the prompt flag with validation were corrected.
+
+### Patch counts (`Extensions/PatchCheck.py`)
+- `counts.vendor_records`, `counts.cve_identifiers` and `counts.advisory_identifiers`, plus the advisory list, are recorded per host, and the finding text reads "N vendor records: X CVEs and Y advisories". Advisory identifiers are no longer counted as CVEs.
+
+### Example scope files
+- `Code/ScopeU1Domain.example.json`, `Code/ScopeU1Workstation.example.json` and `Code/ScopeU1NonEnglish.example.json` describe a central Kerberos run against four servers, a local run on a workgroup host and a local run on a non-English host, all under one engagement (`LAB-U1`) with a corporate SSID list. They ship with `approved_for_lab` false so that approval is granted, and the files hashed, by the person authorising the run rather than by the developer.
+- The analyzer's downstream notice typo is fixed.
+
 ## 0.6, build 2026-10-01 release candidate 2
 
 Corrections from an independent review of the 1 October build. The Python suite is now 182 tests, and a PowerShell fixture suite (`Code/CollectorHelperTests.ps1`, 79 checks) exercises the pure wireless helpers of the collector under Windows PowerShell 5.1 with no adapter, no `netsh` call and no pre-shared key involved. Schema version 1.0, tool version 0.6, the 45 sources and the 45 rules are unchanged.

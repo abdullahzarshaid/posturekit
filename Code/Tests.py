@@ -697,7 +697,7 @@ class Build20261001Tests(unittest.TestCase):
         with (d/'Tests.csv').open('w',encoding='utf-8-sig',newline='') as f:
             w=csv.DictWriter(f,fieldnames=fields,extrasaction='ignore'); w.writeheader()
             for r in rows: w.writerow({k:r.get(k,'') for k in fields})
-        return d
+        return seal_manifest(d)   # a derived folder is only read once its Manifest.txt verifies
     def test_tofindings_review_queue_and_gaps(self):
         rows=[
             {'test_id':'HOST.A.SMB01','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'SMBv1','observed':'True','expected':'False','result':'Fail','control_refs':'Not mapped','evidence_file':'Host.A.json','evidence_sha256':'1'*64},
@@ -775,8 +775,14 @@ def sealed_batch(root, hosts, extra_targets=(), tamper=False, ledger=True, scope
     targets+=[{'asset_id':t,'site_id':'LAB','computer_name':t,'enabled':en} for t,en,_ in extra_targets]
     scope_doc={'schema_version':'1.0','engagement_id':'SYNTHETIC','approved_for_lab':True,'targets':targets}
     if scope: (root/'Scope.json').write_text(json.dumps(scope_doc),encoding='utf-8')
+    scope_digest=a.sha256(root/'Scope.json') if scope else '0'*64
     entries=[]
     for h in hosts:
+        # Copy, never mutate: class-level fixtures are reused across tests with different scope digests.
+        h=dict(h)
+        for key,value in (('schema_version','1.0'),('tool_version','0.6'),('evidence_kind','WindowsCollection'),('site_id','LAB'),
+                          ('engagement_id','SYNTHETIC'),('scope_sha256',scope_digest),('collector_sha256','0'*64)):
+            h.setdefault(key,value)
         name='Host.%s.json'%h['asset_id']; (root/name).write_text(json.dumps(h),encoding='utf-8')
         entries.append({'asset_id':h['asset_id'],'site_id':'LAB','computer_name':h['asset_id'],'status':'Complete','evidence_file':name,'evidence_sha256':a.sha256(root/name)})
     for t,en,status in extra_targets:
@@ -1023,7 +1029,8 @@ _sd_spec=importlib.util.spec_from_file_location('sealderived',HERE/'SealDerived.
 sd=importlib.util.module_from_spec(_sd_spec); _sd_spec.loader.exec_module(sd)
 
 
-class Build20261001RC2Tests(unittest.TestCase):
+class _RC2Fixtures:
+    """Fixture helpers shared by the RC2 and 2 October test classes (not a TestCase)."""
     def setUp(self): self.tmp=tempfile.TemporaryDirectory(); self.root=Path(self.tmp.name)
     def tearDown(self): self.tmp.cleanup()
     def _dir(self,name):
@@ -1032,13 +1039,17 @@ class Build20261001RC2Tests(unittest.TestCase):
         p=self.root/name; p.write_text(json.dumps(obj),encoding='utf-8'); return p
     def _run(self,script,*argv):
         return subprocess.run([sys.executable,str(HERE.parent/script)]+[str(x) for x in argv],capture_output=True,text=True)
-    def _raw(self,asset,error_source=None):
-        return {'schema_version':'1.0','tool_version':'0.6','evidence_kind':'WindowsCollection','asset_id':asset,'site_id':'LAB','engagement_id':'SYNTHETIC',
-                'scope_sha256':'','collector_sha256':'0'*64,'collection_status':'Complete',
-                'started_utc':'2026-10-01T00:00:00Z','completed_utc':'2026-10-01T00:00:01Z',
-                'host':{'computer_name':asset,'domain_role':2,'is_domain_controller':False},
-                'sources':[source(i,status=('Error' if i==error_source else 'Collected')) for i in sorted(a.SOURCE_IDS)]}
-    def _analyze_batch(self,name,targets,evidence_for=(),error_source=None):
+    def _raw(self,asset,error_source=None,fail_signing=False):
+        raw={'schema_version':'1.0','tool_version':'0.6','evidence_kind':'WindowsCollection','asset_id':asset,'site_id':'LAB','engagement_id':'SYNTHETIC',
+             'scope_sha256':'','collector_sha256':'0'*64,'collection_status':'Complete',
+             'started_utc':'2026-10-01T00:00:00Z','completed_utc':'2026-10-01T00:00:01Z',
+             'host':{'computer_name':asset,'domain_role':2,'is_domain_controller':False},
+             'sources':[source(i,status=('Error' if i==error_source else 'Collected')) for i in sorted(a.SOURCE_IDS)]}
+        if fail_signing:   # base_rule() expects RequireSecuritySignature True, so this row is a real Fail
+            for s in raw['sources']:
+                if s['id']=='smbserver': s.update(data=[{'RequireSecuritySignature':False}],returned_count=1,retained_count=1)
+        return raw
+    def _analyze_batch(self,name,targets,evidence_for=(),error_source=None,fail_signing=False):
         """A sealed batch for Analyze: targets=[(asset, enabled, ledger_status)], Host files for evidence_for."""
         d=self._dir(name)
         scope={'schema_version':'1.0','engagement_id':'SYNTHETIC','approved_for_lab':True,
@@ -1048,7 +1059,7 @@ class Build20261001RC2Tests(unittest.TestCase):
                'scope_sha256':a.sha256(d/'Scope.json'),'collector_sha256':'0'*64,'completed_utc':'2026-10-01T00:00:02+00:00','targets':[]}
         for t,en,status in targets:
             if t in evidence_for:
-                raw=self._raw(t,error_source if t==evidence_for[-1] else None); raw['scope_sha256']=batch['scope_sha256']
+                raw=self._raw(t,error_source if t==evidence_for[-1] else None,fail_signing); raw['scope_sha256']=batch['scope_sha256']
                 (d/f'Host.{t}.json').write_text(json.dumps(raw),encoding='utf-8')
                 batch['targets'].append({'asset_id':t,'site_id':'LAB','computer_name':t,'status':'Complete','evidence_file':f'Host.{t}.json','evidence_sha256':a.sha256(d/f'Host.{t}.json')})
             elif status is not None:
@@ -1067,7 +1078,7 @@ class Build20261001RC2Tests(unittest.TestCase):
         with (d/'Tests.csv').open('w',encoding='utf-8-sig',newline='') as f:
             w=csv.DictWriter(f,fieldnames=fields,extrasaction='ignore'); w.writeheader()
             for r in rows: w.writerow({k:r.get(k,'') for k in fields})
-        return d
+        return seal_manifest(d)   # a derived folder is only read once its Manifest.txt verifies
     def _seed(self,doc):
         cache=self._dir('cache')
         (cache/'msrc_index.json').write_text(json.dumps({'value':[{'ID':'2026-Sep'}]}),encoding='utf-8')
@@ -1082,6 +1093,8 @@ class Build20261001RC2Tests(unittest.TestCase):
                                   {'cve':'CVE-2099-0003','kb':'3','fixed_build':'10.0.26100.9','cvss_base_score':7.5,'cvss_vector':'V','known_exploited':False}]}
         block.update(over); return block
 
+
+class Build20261001RC2Tests(_RC2Fixtures, unittest.TestCase):
     # -- 1. EvidenceGate.verify_batch is the shared contract --
     def test_gate_accounts_for_every_scoped_target(self):
         d=self._analyze_batch('b',[('A',True,None),('B',True,'NotAttempted'),('C',False,None),('D',True,None)],evidence_for=('A',))
@@ -1201,6 +1214,7 @@ class Build20261001RC2Tests(unittest.TestCase):
         d=self._tests_csv('derived',[{'test_id':'HOST.A.SMB01','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'o','observed':'False','result':'Pass','evidence_file':'Host.A.json','evidence_sha256':'1'*64}])
         (d/'Coverage.csv').write_text('asset_id,site_id,computer_name,status,evidence,note\nA,LAB,A,Complete,Host.A.json,ok\n',encoding='utf-8-sig')
         (d/'Evidence.json').write_text(json.dumps({'coverage':[{'asset_id':'A','status':'Complete'},{'asset_id':'E','site_id':'LAB','computer_name':'E','status':'EvidenceRejected','note':'Evidence digest mismatch.'}]}),encoding='utf-8')
+        seal_manifest(d)   # re-seal: two files were added after _tests_csv sealed the folder
         out=self.root/'draft'; c=self._run('Extensions/ToFindings.py','--derived',d,'--output',out,'--engagement-id','E')
         self.assertEqual(c.returncode,0,c.stderr); f=json.loads((out/'findings.json').read_text(encoding='utf-8'))
         gaps=[g for g in f['coverage_gaps'] if g.get('asset_id')=='E']
@@ -1243,7 +1257,7 @@ class Build20261001RC2Tests(unittest.TestCase):
     def test_patch_description_and_window_limitation(self):
         block=self._patch_block(limitations=['Only the 1 most recent Microsoft releases were evaluated.','WINDOW TOO NARROW. Outstanding updates were still being found in the oldest release evaluated (2026-Sep), so older releases will contain more. This count is a floor, not a total.'],window_truncated=True)
         f=tf._patch_finding(block,1)
-        self.assertIn('3 CVEs are carried by the outstanding cumulative-update stream',f['description']); self.assertNotIn('security updates are outstanding',f['description'])
+        self.assertIn('the outstanding cumulative-update stream carries 3 vendor records: 3 CVEs and 0 advisories',f['description']); self.assertNotIn('security updates are outstanding',f['description'])
         self.assertTrue(f['window_truncated']); self.assertTrue(f['limitations'].startswith('WINDOW TOO NARROW')); self.assertIn('most recent Microsoft releases',f['limitations'])
         self.assertFalse(tf._patch_finding(self._patch_block(),1)['window_truncated'])
 
@@ -1420,6 +1434,236 @@ class Build20261001RC2Tests(unittest.TestCase):
         c=self._run('Code/SealDerived.py',batch); self.assertEqual(c.returncode,2); self.assertIn('Batch.json',c.stderr); self.assertFalse((batch/'Manifest.txt').exists())
         self.assertEqual(self._run('Code/SealDerived.py').returncode,2)
         with self.assertRaises(ValueError): sd.seal(self.root/'absent')
+
+
+# ---------------------------------------------------------------------------
+# Build 2026-10-02: derived inputs are verified before findings conversion
+# (C1-A), host-document identity is validated in every raw consumer (C1-B),
+# CVE and advisory identifiers are counted apart (C3). Synthetic only.
+# ---------------------------------------------------------------------------
+def seal_manifest(folder):
+    """Write a valid Manifest.txt for a hand-built derived folder, in the same
+    'sha256  name' form Analyze.py and SealDerived.py write and VerifyManifest.py
+    checks. Call it again after adding files to the folder."""
+    folder=Path(folder); lines=[]
+    for item in sorted(folder.iterdir()):
+        if item.is_file() and not item.is_symlink() and item.name!='Manifest.txt':
+            lines.append('%s  %s'%(a.sha256(item),item.name))
+    (folder/'Manifest.txt').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    return folder
+
+
+class Build20261002Tests(_RC2Fixtures, unittest.TestCase):
+    def setUp(self): self.tmp=tempfile.TemporaryDirectory(); self.root=Path(self.tmp.name)
+    def tearDown(self): self.tmp.cleanup()
+    RULES={'schema_version':'1.0','profile_id':'SYN','rules':[base_rule()]}
+    def _failing_derived(self,name='b'):
+        batch=self._analyze_batch(name,[('A',True,None),('B',True,'NotAttempted')],evidence_for=('A',),fail_signing=True)
+        return batch,self._derived(batch)
+    def _findings(self,derived,*extra,out='draft'):
+        out=self.root/out; c=self._run('Extensions/ToFindings.py','--derived',derived,'--output',out,*extra)
+        doc=json.loads((out/'findings.json').read_text(encoding='utf-8')) if (out/'findings.json').exists() else None
+        return c,doc
+    def _assert_rejected(self,c,f,derived,fragment):
+        self.assertEqual(c.returncode,2,c.stdout+c.stderr)
+        self.assertEqual(f['register_status'],'InputRejected'); self.assertEqual(f['findings'],[]); self.assertEqual(f['review_queue'],[])
+        self.assertEqual(f['counts']['findings'],0); self.assertEqual(len(f['coverage_gaps']),1)
+        g=f['coverage_gaps'][0]
+        self.assertTrue(g['id'].startswith('GAP-IN-'),g['id']); self.assertEqual(g['kind'],'CoverageGap')
+        self.assertTrue(g['description'].startswith('Derived analysis input rejected: '),g['description'])
+        self.assertIn(str(Path(derived).resolve()),g['description']); self.assertIn(fragment,g['description'])
+        self.assertIn('rejected',c.stdout.lower())
+
+    # -- C1-A: an unchanged, sealed replay still converts --
+    def test_tofindings_valid_sealed_replay_converts(self):
+        batch,derived=self._failing_derived()
+        self.assertEqual(self._run('Code/VerifyManifest.py',derived).returncode,0)
+        c,f=self._findings(derived,'--engagement-id','SYNTHETIC')
+        self.assertEqual(c.returncode,0,c.stderr); self.assertEqual(f['register_status'],'DRAFT')
+        self.assertEqual([x['id'] for x in f['findings']],['CFG-01']); self.assertEqual(f['findings'][0]['source_rule'],'T1'); self.assertEqual(f['findings'][0]['affected_assets'],['A'])
+        self.assertFalse([g for g in f['coverage_gaps'] if g['id'].startswith('GAP-IN-')])
+        self.assertEqual({g['asset_id'] for g in f['coverage_gaps'] if g['id'].startswith('GAP-CV-')},{'B'})
+        # without --engagement-id the register carries the evidence set's own engagement
+        c,f=self._findings(derived,out='draft2'); self.assertEqual(c.returncode,0,c.stderr); self.assertEqual(f['engagement_id'],'SYNTHETIC')
+        ev=json.loads((derived/'Evidence.json').read_text(encoding='utf-8'))
+        self.assertIn('for the approved reporting workflow',ev['downstream_notice']); self.assertNotIn('for approved the approved',ev['downstream_notice'])
+
+    # -- C1-A: the reproduced defect, a flipped Tests.csv under an unchanged Manifest.txt --
+    def test_tofindings_flipped_tests_csv_with_unchanged_manifest_is_rejected(self):
+        batch,derived=self._failing_derived()
+        text=(derived/'Tests.csv').read_text(encoding='utf-8-sig'); self.assertIn(',Fail,',text)
+        (derived/'Tests.csv').write_text(text.replace(',Fail,',',Pass,'),encoding='utf-8-sig')
+        v=self._run('Code/VerifyManifest.py',derived); self.assertEqual(v.returncode,1); self.assertIn('Tests.csv: HASH MISMATCH',v.stdout)
+        c,f=self._findings(derived,'--engagement-id','SYNTHETIC')
+        self._assert_rejected(c,f,derived,'Tests.csv')
+        self.assertIn('HASH MISMATCH',f['coverage_gaps'][0]['description'])
+    def test_tofindings_missing_manifest_is_rejected(self):
+        batch,derived=self._failing_derived(); (derived/'Manifest.txt').unlink()
+        c,f=self._findings(derived,'--engagement-id','SYNTHETIC'); self._assert_rejected(c,f,derived,'Manifest.txt')
+    def test_tofindings_unmanifested_file_is_rejected(self):
+        batch,derived=self._failing_derived(); (derived/'notes.txt').write_text('edited after sealing',encoding='utf-8')
+        c,f=self._findings(derived,'--engagement-id','SYNTHETIC'); self._assert_rejected(c,f,derived,'notes.txt'); self.assertIn('UNMANIFESTED',f['coverage_gaps'][0]['description'])
+    def test_tofindings_missing_listed_file_is_rejected(self):
+        batch,derived=self._failing_derived(); (derived/'Coverage.csv').unlink()
+        c,f=self._findings(derived,'--engagement-id','SYNTHETIC'); self._assert_rejected(c,f,derived,'Coverage.csv'); self.assertIn('MISSING',f['coverage_gaps'][0]['description'])
+    def test_tofindings_engagement_id_mismatch_is_rejected(self):
+        batch,derived=self._failing_derived()
+        c,f=self._findings(derived,'--engagement-id','OTHER'); self._assert_rejected(c,f,derived,'engagement_id')
+        self.assertIn('SYNTHETIC',f['coverage_gaps'][0]['description']); self.assertIn('OTHER',f['coverage_gaps'][0]['description'])
+    def test_tofindings_rejection_happens_before_tests_csv_is_read(self):
+        # Tests.csv absent AND unmanifested extra file: the manifest verdict comes first, never the Tests.csv error.
+        batch,derived=self._failing_derived(); (derived/'Tests.csv').unlink()
+        c,f=self._findings(derived,'--engagement-id','SYNTHETIC'); self._assert_rejected(c,f,derived,'Tests.csv'); self.assertNotIn('Run Analyze.py first',c.stderr)
+    def test_tofindings_missing_explicit_input_path_still_exits_4(self):
+        batch,derived=self._failing_derived()
+        c,f=self._findings(derived,'--patch',self.root/'missing.json','--engagement-id','SYNTHETIC')
+        self.assertEqual(c.returncode,4,c.stderr); self.assertEqual(f['register_status'],'DRAFT'); self.assertEqual([x['id'] for x in f['findings']],['CFG-01'])
+        gaps=[g for g in f['coverage_gaps'] if g['id'].startswith('GAP-IN-')]; self.assertEqual(len(gaps),1); self.assertIn('missing.json',gaps[0]['description'])
+
+    # -- C1-A: patch and software outputs must come from an analysed batch --
+    def _patch_doc(self,source_batch,host_batch=None):
+        host=self._patch_block(status='MissingUpdates')
+        if host_batch is not None: host['source_batch']=host_batch
+        doc={'schema_version':'1.0','evidence_kind':'MissingUpdateAssessment','generated_utc':'2026-10-02T00:00:00+00:00','status':'MissingUpdates',
+             'kev_available':True,'feed_fetched_utc':'2026-09-30T06:00:00+00:00','hosts':[host]}
+        if source_batch is not None: doc['source_batch']=source_batch
+        return doc
+    def _software_doc(self,source_batch):
+        host={'asset_id':'A','computer_name':'A','inventory_status':'Collected','status':'RiskySoftware','counts':{'inventory_size':1,'flagged':1,'end_of_life':1,'below_floor':0,'kev_product_present':0,'version_unreadable':0},
+              'items':[{'name':'Adobe Flash Player','version':'32.0','publisher':'Adobe','risk_type':'EndOfLife','basis':'EOL','severity':'ANALYST REQUIRED'}],'limitations':[]}
+        doc={'schema_version':'1.0','evidence_kind':'SoftwareRiskAssessment','generated_utc':'2026-10-02T00:00:00+00:00','status':'RiskySoftware','hosts':[host]}
+        if source_batch is not None: doc['source_batch']=source_batch
+        return doc
+    def test_tofindings_patch_output_from_another_batch_is_a_gap_not_a_finding(self):
+        batch,derived=self._failing_derived()
+        self.assertEqual(json.loads((derived/'Evidence.json').read_text(encoding='utf-8'))['metadata']['batch_ids'],['B1'])
+        c,f=self._findings(derived,'--patch',self._json('foreign.json',self._patch_doc('B9')),'--engagement-id','SYNTHETIC',out='d1')
+        self.assertEqual(c.returncode,4,c.stderr); self.assertEqual(f['register_status'],'DRAFT')
+        self.assertEqual([x['id'] for x in f['findings']],['CFG-01'])
+        gaps=[g for g in f['coverage_gaps'] if g['id'].startswith('GAP-IN-')]; self.assertEqual(len(gaps),1)
+        self.assertIn('patch output does not belong to the analysed batches',gaps[0]['description']); self.assertIn('B9',gaps[0]['description']); self.assertIn('B1',gaps[0]['description'])
+        self.assertEqual(gaps[0]['input_kind'],'patch'); self.assertEqual(f['counts']['required_input_failures'],1)
+        self.assertEqual(len({g['id'] for g in f['coverage_gaps']}),len(f['coverage_gaps']))
+        # a per-host source_batch that contradicts the analysed batches is rejected even when the top level matches
+        c,f=self._findings(derived,'--patch',self._json('hostforeign.json',self._patch_doc('B1',host_batch='B9')),'--engagement-id','SYNTHETIC',out='d2')
+        self.assertEqual(c.returncode,4,c.stderr); self.assertEqual([x['id'] for x in f['findings']],['CFG-01'])
+        self.assertTrue(any('patch output does not belong' in g['description'] for g in f['coverage_gaps']))
+    def test_tofindings_patch_output_without_source_batch_is_a_gap(self):
+        batch,derived=self._failing_derived()
+        c,f=self._findings(derived,'--patch',self._json('nobatch.json',self._patch_doc(None)),'--engagement-id','SYNTHETIC')
+        self.assertEqual(c.returncode,4,c.stderr); self.assertEqual([x['id'] for x in f['findings']],['CFG-01'])
+        gaps=[g for g in f['coverage_gaps'] if g['id'].startswith('GAP-IN-')]; self.assertEqual(len(gaps),1)
+        self.assertIn('source_batch',gaps[0]['description']); self.assertIn('patch output does not belong to the analysed batches',gaps[0]['description'])
+    def test_tofindings_patch_output_from_the_analysed_batch_converts(self):
+        batch,derived=self._failing_derived()
+        c,f=self._findings(derived,'--patch',self._json('own.json',self._patch_doc('B1')),'--engagement-id','SYNTHETIC')
+        self.assertEqual(c.returncode,0,c.stderr); self.assertEqual([x['id'] for x in f['findings']],['VULN-01','CFG-01'])
+        self.assertFalse([g for g in f['coverage_gaps'] if g['id'].startswith('GAP-IN-')]); self.assertEqual(f['findings'][0]['evidence'][0]['source_batch'],'B1')
+    def test_tofindings_software_output_from_another_batch_is_a_gap(self):
+        batch,derived=self._failing_derived()
+        c,f=self._findings(derived,'--software',self._json('sw9.json',self._software_doc('B9')),'--engagement-id','SYNTHETIC',out='s1')
+        self.assertEqual(c.returncode,4,c.stderr); self.assertEqual([x['id'] for x in f['findings']],['CFG-01'])
+        gaps=[g for g in f['coverage_gaps'] if g['id'].startswith('GAP-IN-')]; self.assertEqual(len(gaps),1)
+        self.assertIn('software output does not belong to the analysed batches',gaps[0]['description']); self.assertEqual(gaps[0]['input_kind'],'software')
+        c,f=self._findings(derived,'--software',self._json('sw1.json',self._software_doc('B1')),'--engagement-id','SYNTHETIC',out='s2')
+        self.assertEqual(c.returncode,0,c.stderr); self.assertEqual([x['id'] for x in f['findings']],['CFG-01','SW-01'])
+    def test_tofindings_hand_built_derived_without_evidence_json_skips_batch_membership(self):
+        # Evidence.json absent (an older or hand-assembled derived folder): nothing lists the analysed batches, so a
+        # patch output that names its batch converts; one that names no batch at all is still a gap.
+        d=seal_manifest(self._tests_csv('derived',[{'test_id':'HOST.A.SMB01','category':'smbserver','asset_id':'A','site_id':'LAB','objective':'o','observed':'False','result':'Pass','evidence_file':'Host.A.json','evidence_sha256':'1'*64}]))
+        c,f=self._findings(d,'--patch',self._json('p.json',self._patch_doc('ANY')),'--engagement-id','E',out='h1')
+        self.assertEqual(c.returncode,0,c.stderr); self.assertEqual([x['id'] for x in f['findings']],['VULN-01'])
+        c,f=self._findings(d,'--patch',self._json('p0.json',self._patch_doc(None)),'--engagement-id','E',out='h2')
+        self.assertEqual(c.returncode,4,c.stderr); self.assertEqual(f['findings'],[])
+
+    # -- C1-B: EvidenceGate.validate_host_document --
+    def test_validate_host_document_lists_every_contradiction(self):
+        d=self._analyze_batch('b',[('A',True,None)],evidence_for=('A',)); g=eg.verify_batch(d); target=g['targets'][0]; batch=g['batch']
+        raw=json.loads((d/'Host.A.json').read_text(encoding='utf-8'))
+        self.assertEqual(eg.validate_host_document(raw,target,batch),[])
+        ok=copy.deepcopy(raw); ok['host']['computer_name']='a'; self.assertEqual(eg.validate_host_document(ok,target,batch),[])   # case-insensitive
+        bad=copy.deepcopy(raw); bad.update(schema_version='2.0',tool_version='9',evidence_kind='Other',engagement_id='OTHER-ENGAGEMENT',asset_id='OUTSIDE',site_id='X',scope_sha256='f'*64,collector_sha256='e'*64)
+        bad['host']['computer_name']='ZZ'
+        reasons=eg.validate_host_document(bad,target,batch); self.assertEqual(len(reasons),9,reasons)
+        for key in ('schema_version','tool_version','evidence_kind','engagement_id','asset_id','site_id','computer_name','scope_sha256','collector_sha256'):
+            self.assertTrue(any(key in r for r in reasons),key)
+        self.assertTrue(any('OUTSIDE' in r and "'A'" in r for r in reasons),reasons)
+        nb=copy.deepcopy(raw); nb['host']=None; self.assertTrue(any('computer_name' in r for r in eg.validate_host_document(nb,target,batch)))
+        self.assertEqual(len(eg.validate_host_document('not a document',target,batch)),1)
+    def _g2_batch(self,name='b'):
+        """The G2 fixture: ledger names asset A, Host.A.json is digest-consistent but claims asset OUTSIDE in OTHER-ENGAGEMENT."""
+        d=self._analyze_batch(name,[('A',True,None)],evidence_for=('A',))
+        raw=json.loads((d/'Host.A.json').read_text(encoding='utf-8')); raw['asset_id']='OUTSIDE'; raw['engagement_id']='OTHER-ENGAGEMENT'
+        (d/'Host.A.json').write_text(json.dumps(raw),encoding='utf-8')
+        ledger=json.loads((d/'Batch.json').read_text(encoding='utf-8')); ledger['targets'][0]['evidence_sha256']=a.sha256(d/'Host.A.json')
+        (d/'Batch.json').write_text(json.dumps(ledger),encoding='utf-8')
+        self.assertEqual(eg.verify_batch(d)['hosts'][0]['status'],'Complete')   # the digest alone passes it
+        return d
+    def test_g2_identity_contradiction_is_rejected_by_every_raw_consumer(self):
+        d=self._g2_batch()
+        assets,tests,_,_=a.analyze_batch(d,self.RULES)
+        self.assertEqual((assets[0]['asset_id'],assets[0]['status']),('A','EvidenceRejected')); self.assertIn('asset_id',assets[0]['note']); self.assertIn('engagement_id',assets[0]['note']); self.assertEqual(tests,[])
+        for module in (pc,sc):
+            hosts=module.gate_hosts(str(d)); self.assertEqual([h['asset_id'] for h in hosts],['A'],module.__name__)
+            self.assertEqual(hosts[0]['status'],'EvidenceRejected',module.__name__)
+            for fragment in ('asset_id','OUTSIDE','engagement_id','OTHER-ENGAGEMENT'): self.assertIn(fragment,hosts[0]['reason'],module.__name__)
+        c=self._run('Extensions/SoftwareCheck.py','--batch',d,'--output',self.root/'sw','--no-kev')
+        self.assertNotIn('Traceback',c.stderr); self.assertEqual(c.returncode,2,c.stderr); sw=json.loads((self.root/'sw'/'SoftwareRisk.json').read_text(encoding='utf-8'))
+        self.assertEqual([(h['asset_id'],h['status'],h['items']) for h in sw['hosts']],[('A','EvidenceRejected',[])])
+        self.assertIn('OUTSIDE',sw['hosts'][0]['rejection_reason']); self.assertEqual(sw['hosts'][0]['document_asset_id'],'OUTSIDE'); self.assertEqual(sw['status'],'EvidenceRejected')
+        cache=self._seed(msrc_doc(SERVER_2022,[vuln('CVE-1',[('11923','10.0.20348.2000')])]))
+        c=self._run('Extensions/PatchCheck.py','--batch',d,'--output',self.root/'pt','--cache',cache,'--offline')
+        self.assertNotIn('Traceback',c.stderr); self.assertEqual(c.returncode,2,c.stderr); pt=json.loads((self.root/'pt'/'MissingUpdates.json').read_text(encoding='utf-8'))
+        self.assertEqual([(h['asset_id'],h['status'],h['missing_updates'],h['product_matched']) for h in pt['hosts']],[('A','EvidenceRejected',[],None)])
+        self.assertIn('OUTSIDE',pt['hosts'][0]['rejection_reason']); self.assertEqual(pt['hosts'][0]['document_asset_id'],'OUTSIDE'); self.assertEqual(pt['asset_id'],'A')
+    def test_valid_batch_unchanged_and_collector_hash_is_batch_lineage_not_release(self):
+        d=self._analyze_batch('b',[('A',True,None)],evidence_for=('A',))
+        old='a'*64   # a collector this release never shipped
+        self.assertNotEqual(a.sha256(HERE/'Collect.ps1'),old)
+        raw=json.loads((d/'Host.A.json').read_text(encoding='utf-8')); raw['collector_sha256']=old; (d/'Host.A.json').write_text(json.dumps(raw),encoding='utf-8')
+        ledger=json.loads((d/'Batch.json').read_text(encoding='utf-8')); ledger['collector_sha256']=old; ledger['targets'][0]['evidence_sha256']=a.sha256(d/'Host.A.json')
+        (d/'Batch.json').write_text(json.dumps(ledger),encoding='utf-8')
+        assets,tests,meta,_=a.analyze_batch(d,self.RULES); self.assertEqual(assets[0]['status'],'Complete'); self.assertEqual(meta['collector_sha256'],old); self.assertEqual(len(tests),1)
+        for module in (pc,sc): self.assertEqual([(h['asset_id'],h['status']) for h in module.gate_hosts(str(d))],[('A','Accepted')],module.__name__)
+        c=self._run('Extensions/SoftwareCheck.py','--batch',d,'--output',self.root/'sw','--no-kev'); self.assertEqual(c.returncode,0,c.stderr)
+        sw=json.loads((self.root/'sw'/'SoftwareRisk.json').read_text(encoding='utf-8'))
+        self.assertEqual((sw['hosts'][0]['status'],sw['hosts'][0]['collector_sha256'],sw['collector_sha256']),('NoRiskySoftwareFound',old,old))
+        self.assertEqual((sw['source_batch'],sw['source_batch_dir'],sw['engagement_id'],sw['hosts'][0]['source_batch']),('B1','b','SYNTHETIC','B1'))
+        cache=self._seed(msrc_doc(SERVER_2022,[])); c=self._run('Extensions/PatchCheck.py','--batch',d,'--output',self.root/'pt','--cache',cache,'--offline')
+        self.assertNotIn('Traceback',c.stderr); pt=json.loads((self.root/'pt'/'MissingUpdates.json').read_text(encoding='utf-8'))
+        self.assertEqual((pt['hosts'][0]['asset_id'],pt['hosts'][0]['collector_sha256'],pt['collector_sha256']),('A',old,old))
+        self.assertEqual((pt['source_batch'],pt['source_batch_dir'],pt['engagement_id'],pt['hosts'][0]['source_batch']),('B1','b','SYNTHETIC','B1'))
+        # a host whose recorded collector differs from the batch's is lineage broken, whatever this release ships
+        raw['collector_sha256']='b'*64; (d/'Host.A.json').write_text(json.dumps(raw),encoding='utf-8')
+        ledger['targets'][0]['evidence_sha256']=a.sha256(d/'Host.A.json'); (d/'Batch.json').write_text(json.dumps(ledger),encoding='utf-8')
+        self.assertEqual(a.analyze_batch(d,self.RULES)[0][0]['status'],'EvidenceRejected')
+        for module in (pc,sc):
+            h=module.gate_hosts(str(d))[0]; self.assertEqual(h['status'],'EvidenceRejected'); self.assertIn('collector_sha256',h['reason'])
+
+    # -- C3: CVE and advisory identifiers are counted apart --
+    def test_patchcheck_counts_split_cves_and_advisories(self):
+        doc=msrc_doc(SERVER_2022,[vuln('CVE-2026-0001',[('11923','10.0.20348.2000')]),vuln('CVE-2026-0002',[('11923','10.0.20348.2100')]),vuln('ADV220005',[('11923','10.0.20348.2200')])])
+        r=pc.assess_host(host_doc('A','Microsoft Windows Server 2022 Standard','10.0.20348.1000'),[('2026-Sep',doc)],{'CVE-2026-0001'},True,'B1')
+        self.assertEqual(r['status'],'MissingUpdates'); counts=r['counts']
+        self.assertEqual((counts['total'],counts['vendor_records'],counts['cve_identifiers'],counts['advisory_identifiers'],counts['known_exploited']),(3,3,2,1,1))
+        self.assertEqual(r['advisories'],['ADV220005'])
+        self.assertEqual(pc.is_cve_identifier('CVE-2026-0001'),True); self.assertEqual(pc.is_cve_identifier('cve-2026-12345'),True)
+        for text in ('ADV220005','ADV990001','',None,'CVE-2026'): self.assertFalse(pc.is_cve_identifier(text),text)
+        f=tf._patch_finding(dict(r,feed_fetched_utc='2026-09-30T06:00:00+00:00'),1)
+        for field in ('description','observed_result'):
+            self.assertIn('3 vendor records: 2 CVEs and 1 advisory (ADV220005)',f[field],field); self.assertNotIn('3 CVEs',f[field],field)
+        self.assertEqual(f['advisories'],['ADV220005']); self.assertEqual(f['counts'],{'vendor_records':3,'cve_identifiers':2,'advisory_identifiers':1,'known_exploited':1})
+        self.assertIn('1 of the outstanding CVEs',f['exploitability']); self.assertIn('CVE-2026-0001',f['exploitability'])
+        self.assertEqual({d['cve']:d['identifier_kind'] for d in f['cve_detail']},{'CVE-2026-0001':'CVE','CVE-2026-0002':'CVE','ADV220005':'advisory'})
+        self.assertNotIn('Outstanding CVEs:',f['observed_result'])
+    def test_patch_finding_wording_without_advisories_and_from_older_input(self):
+        f=tf._patch_finding(self._patch_block(),1)
+        self.assertIn('3 vendor records: 3 CVEs and 0 advisories',f['description']); self.assertNotIn('(',f['description'].split('3 vendor records')[1].split('.')[0])
+        self.assertEqual(f['advisories'],[]); self.assertEqual(f['counts']['cve_identifiers'],3)
+        block=self._patch_block(); block['missing_updates'][2]['cve']='ADV990001'; block['missing_updates'][1]['cve']='ADV990002'   # no split counts recorded: derived from the rows
+        f=tf._patch_finding(block,1)
+        self.assertIn('3 vendor records: 1 CVE and 2 advisories (ADV990002, ADV990001)',f['description']); self.assertEqual(f['advisories'],['ADV990002','ADV990001'])
+        self.assertIn('3 vendor records: 1 CVE and 2 advisories (ADV990002, ADV990001)',f['observed_result'])
 
 
 if __name__=='__main__': unittest.main()

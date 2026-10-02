@@ -43,10 +43,24 @@ than ``MAX_FEED_AGE_DAYS`` are re-fetched unless ``--offline`` is given.
 
 Every target in the approved scope (Scope.json) is accounted for. A Host file is
 assessed only after its SHA-256 has been checked against the ``evidence_sha256``
-recorded for that asset in Batch.json; a target with no verified evidence is
-written as NotAttempted (or Excluded) with the ledger's own reason, so that an
-unreached host can never be presented as patched. A folder without Batch.json
-and Scope.json is refused outright.
+recorded for that asset in Batch.json AND its own identity (schema, engagement,
+asset, site, computer name, scope and collector lineage) agrees with the ledger
+target it is claimed for (``EvidenceGate.validate_host_document``); a
+contradiction is EvidenceRejected under the ledger's asset id, never assessed.
+A target with no verified evidence is written as NotAttempted (or Excluded)
+with the ledger's own reason, so that an unreached host can never be presented
+as patched. A folder without Batch.json and Scope.json is refused outright.
+
+Output lineage: ``source_batch`` is the ledger's ``batch_id`` (the directory
+basename, which Run.ps1 names after the same id, is kept as
+``source_batch_dir``); ``collector_sha256`` is recorded at the top level and per
+host as the batch recorded it, never re-derived from the current Collect.ps1.
+
+Identifier counts: Microsoft's vulnerability list carries advisories (ADV...)
+next to CVEs. ``counts.vendor_records`` is every outstanding row,
+``counts.cve_identifiers`` and ``counts.advisory_identifiers`` split them, and
+``advisories`` lists the non-CVE identifiers. ``counts.total`` is kept for
+older consumers and means vendor records, not CVEs.
 """
 
 import argparse
@@ -74,6 +88,17 @@ TIMEOUT = 90
 MAX_FEED_AGE_DAYS = 35
 
 _FETCH_ERRORS = (urllib.error.URLError, socket.timeout, ValueError, OSError)
+
+# A CVE identifier as MITRE issues it. Anything else in the vendor's "CVE" field
+# (ADV220005 and the like) is an advisory and is never counted as a CVE.
+CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
+
+
+def is_cve_identifier(identifier):
+    """True for a CVE id (CVE-YYYY-NNNN...), False for an advisory or empty value."""
+    if not identifier:
+        return False
+    return CVE_RE.fullmatch(str(identifier).strip()) is not None
 
 
 class FeedUnavailable(Exception):
@@ -468,6 +493,7 @@ def _host_shell(host_document, batch_name):
         "observed_build": host.get("full_build"),
         "full_build": host.get("full_build"),
         "source_batch": batch_name,
+        "collector_sha256": host_document.get("collector_sha256"),
         "status": None,
         "product_matched": None,
         "documents_evaluated": [],
@@ -568,8 +594,14 @@ def assess_host(host_document, documents, kev_ids, kev_available, batch_name,
 
     result["missing_updates"] = findings
     result["status"] = "MissingUpdates" if findings else "NoMissingUpdates"
+    advisories = [str(f["cve"]) for f in findings if not is_cve_identifier(f.get("cve"))]
+    result["advisories"] = advisories
     result["counts"] = {
+        # total is kept for older consumers; it counts vendor records, not CVEs.
         "total": len(findings),
+        "vendor_records": len(findings),
+        "cve_identifiers": len(findings) - len(advisories),
+        "advisory_identifiers": len(advisories),
         "known_exploited": sum(1 for f in findings if f["known_exploited"] is True),
         "critical_9_plus": sum(1 for f in findings
                                if (f.get("cvss_base_score") or 0) >= 9.0),
@@ -613,16 +645,35 @@ def gate_hosts(batch):
 
     Returns a list of dicts in scope order, one per approved target:
       {'asset_id', 'status', 'evidence_file', 'document', 'reason'}
-    status is one of Accepted (digest verified; document loaded), EvidenceRejected,
-    NotAttempted (ledger status NotAttempted/Error/Pending, or no ledger entry) or
-    Excluded. A Host file present on disk that no accepted ledger entry covers is
-    EvidenceRejected: it exists, but it is not sealed, so it must never produce a
-    patch result and must never be hidden behind NotAttempted either.
+    status is one of Accepted (digest verified, identity verified, document
+    loaded), EvidenceRejected, NotAttempted (ledger status NotAttempted/Error/
+    Pending, or no ledger entry) or Excluded. A Host file present on disk that no
+    accepted ledger entry covers is EvidenceRejected: it exists, but it is not
+    sealed, so it must never produce a patch result and must never be hidden
+    behind NotAttempted either. A digest-consistent Host file whose own identity
+    contradicts the ledger target (another asset, another engagement, another
+    scope or collector) is EvidenceRejected too, listed under the LEDGER asset id
+    with every contradiction in its reason.
 
     Raises ValueError (from EvidenceGate) when Batch.json or Scope.json is missing
     or fails validation; the caller refuses the folder.
     """
+    return gate_batch(batch)[1]
+
+
+def gate_batch(batch):
+    """(identity, hosts) for a sealed batch: identity is the ledger's own
+    {'batch_id', 'engagement_id', 'scope_sha256', 'collector_sha256', 'batch_dir'},
+    hosts is what gate_hosts() returns."""
     gate = EvidenceGate.verify_batch(batch)
+    identity = {
+        "batch_id": None if gate.get("batch_id") is None else str(gate["batch_id"]),
+        "engagement_id": gate.get("engagement_id"),
+        "scope_sha256": gate.get("scope_sha256"),
+        "collector_sha256": (gate.get("batch") or {}).get("collector_sha256"),
+        "batch_dir": gate.get("batch_dir"),
+    }
+    targets = {t["asset_id"]: t for t in gate["targets"]}
     on_disk = {}
     for name in sorted(os.listdir(batch)):
         if name.startswith("Host.") and name.lower().endswith(".json"):
@@ -658,7 +709,13 @@ def gate_hosts(batch):
                     record.update(status="EvidenceRejected", reason="%s could not be read (%s)" % (name, exc))
                     hosts.append(record)
                     continue
-            record.update(status="Accepted", document=document)
+            contradictions = EvidenceGate.validate_host_document(document, targets[asset_id], gate["batch"])
+            if contradictions:
+                record.update(status="EvidenceRejected", document=document,
+                              reason="host document identity mismatch in %s for ledger asset %s: %s"
+                                     % (name, asset_id, "; ".join(contradictions)))
+            else:
+                record.update(status="Accepted", document=document)
         else:
             # NotAttempted / Error / Pending, or no ledger entry at all.
             record["status"] = "NotAttempted"
@@ -679,7 +736,7 @@ def gate_hosts(batch):
                       "document": document, "ledger_status": None,
                       "reason": "no ledger entry in Batch.json for asset %s (%s) and the asset is not in "
                                 "the approved scope" % (asset_id, name)})
-    return hosts
+    return identity, hosts
 
 
 def verify_hosts(batch):
@@ -707,9 +764,14 @@ def verify_hosts(batch):
             for h in hosts]
 
 
-def _rejected(document, name, reason, batch_name):
+def _rejected(document, name, reason, batch_name, ledger_asset_id=None):
+    """A rejected host. It is listed under the LEDGER asset id (the document's own
+    asset_id, which may contradict it, is kept as document_asset_id)."""
     result = _host_shell(document or {}, batch_name)
     result["evidence_file"] = name
+    result["document_asset_id"] = result["asset_id"]
+    if ledger_asset_id is not None:
+        result["asset_id"] = ledger_asset_id
     result["status"] = "EvidenceRejected"
     result["rejection_reason"] = reason
     result["limitations"].append(
@@ -743,7 +805,7 @@ def _host_result(gate_host, batch_name, assess):
         return assess(gate_host["document"])
     if gate_host["status"] == "EvidenceRejected":
         return _rejected(gate_host.get("document"), gate_host.get("evidence_file"),
-                         gate_host.get("reason"), batch_name)
+                         gate_host.get("reason"), batch_name, gate_host.get("asset_id"))
     return _not_attempted(gate_host, batch_name)
 
 
@@ -769,11 +831,13 @@ def main():
     arguments = parser.parse_args()
 
     batch = arguments.batch
-    batch_name = os.path.basename(os.path.abspath(batch))
+    batch_dir_name = os.path.basename(os.path.abspath(batch))
     try:
-        gate = gate_hosts(batch)
+        identity, gate = gate_batch(batch)
     except ValueError as exc:
         raise SystemExit("Refusing to assess %s: %s" % (batch, exc))
+    # The batch a result came from is the ledger's batch_id, not a folder name.
+    batch_name = identity["batch_id"] or batch_dir_name
     if not gate:
         raise SystemExit("No target is accounted for in %s. Nothing was collected, so no "
                          "patch determination is possible." % batch)
@@ -789,6 +853,10 @@ def main():
         "evidence_kind": "MissingUpdateAssessment",
         "generated_utc": _now().isoformat(),
         "source_batch": batch_name,
+        "source_batch_dir": batch_dir_name,
+        "engagement_id": identity["engagement_id"],
+        "scope_sha256": identity["scope_sha256"],
+        "collector_sha256": identity["collector_sha256"],
         "method": ("Servicing level recorded by the collector compared against "
                    "Microsoft CVRF FixedBuild per product on the host's own "
                    "servicing branch. No host execution, no exploitation, no "
@@ -932,9 +1000,13 @@ def _write(output_dir, result):
         if counts:
             kev = ("known-exploited %d" % counts["known_exploited"]
                    if result.get("kev_available") else "known-exploited n/a")
-            print("Missing updates   : %d  (critical %d, high %d, %s)"
+            print("Missing updates   : %d vendor records  (critical %d, high %d, %s)"
                   % (counts["total"], counts["critical_9_plus"],
                      counts["high_7_plus"], kev))
+            print("Identifiers       : %d CVEs, %d advisories%s"
+                  % (counts.get("cve_identifiers", counts["total"]),
+                     counts.get("advisory_identifiers", 0),
+                     (" (%s)" % ", ".join(host.get("advisories") or [])) if host.get("advisories") else ""))
         if host.get("window_truncated"):
             print("WARNING           : the evaluation window is too narrow. Updates were still")
             print("                    being found in the oldest release checked, so this count")
