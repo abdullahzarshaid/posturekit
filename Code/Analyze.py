@@ -172,6 +172,36 @@ def load_rules(path: Path) -> dict[str, Any]:
                     or not isinstance(absent.get('interpretation'), str)
                     or not absent['interpretation'].strip()):
                 raise ValueError('absent_means must state a valid result and a written interpretation.')
+        # absent_os_default: a registry value whose absence means the operating-system
+        # default applies, where that default is only secure on a sufficiently updated
+        # build (Point and Print, KB5005652). The result is decided from the host's own
+        # build evidence at evaluation time, never assumed. A rule declares at most one
+        # of absent_means / absent_os_default.
+        osd = rule.get('absent_os_default')
+        if osd is not None:
+            if absent is not None:
+                raise ValueError('A rule may declare absent_means or absent_os_default, not both.')
+            if not isinstance(osd, dict) or osd.get('secure_result') not in RESULTS:
+                raise ValueError('absent_os_default needs a valid secure_result.')
+            for key in ('secure_interpretation', 'undetermined_interpretation', 'build_source', 'build_field', 'ubr_field'):
+                if not isinstance(osd.get(key), str) or not osd[key].strip():
+                    raise ValueError(f'absent_os_default is missing a required string field: {key}')
+            if osd['build_source'] not in SOURCE_IDS:
+                raise ValueError('absent_os_default build_source is not a known source.')
+            for key in ('secure_interpretation', 'undetermined_interpretation'):
+                try:
+                    osd[key] % 'build'
+                except (TypeError, ValueError):
+                    raise ValueError(f'absent_os_default {key} must contain exactly one percent-s placeholder.')
+            families = osd.get('families')
+            if not isinstance(families, list) or not families:
+                raise ValueError('absent_os_default needs a non-empty families list.')
+            for family in families:
+                if (not isinstance(family, dict) or not isinstance(family.get('name'), str) or not family['name'].strip()
+                        or type(family.get('min_build')) is not int or type(family.get('max_build')) is not int
+                        or type(family.get('min_ubr')) is not int
+                        or family['min_build'] > family['max_build'] or family['min_ubr'] < 0):
+                    raise ValueError('Each absent_os_default family needs name, min_build <= max_build and min_ubr >= 0.')
         if not ID_RE.fullmatch(rule['id']) or rule['type'] not in (
                 'bool', 'enum_bool', 'int', 'string',
                 'int_any', 'numeric_max', 'numeric_min', 'numeric_between'):
@@ -275,6 +305,42 @@ def make_test(*, test_id: str, phase: str, category: str, objective: str, method
     }
 
 
+def evaluate_absent_os_default(osd: dict[str, Any], sources: dict[str, dict[str, Any]], base: dict[str, Any]) -> dict[str, Any]:
+    """Decide an absent registry value whose meaning depends on the OS update state.
+
+    Point and Print (KB5005652, CVE-2021-34481): once the August 10 2021 update is
+    installed, an absent RestrictDriverInstallationToAdministrators value defaults to
+    administrator-only, so absence is the secure default on a sufficiently updated build.
+    The decision is read from the host's own build evidence (the build_source source);
+    it is never assumed. If that evidence is missing, Error/Partial, ambiguous or the
+    build cannot be placed at or after the update for its OS family, the result is
+    Unknown with the reason, not a Pass and not a Fail."""
+    def undetermined(build_text: str) -> dict[str, Any]:
+        return make_test(**base, observed={'value': None, 'os_build': build_text, 'default_basis': osd.get('kb')},
+                         result='Unknown', interpretation=osd['undetermined_interpretation'] % build_text)
+    source = sources.get(osd['build_source'])
+    if not source or source.get('status') != 'Collected':
+        state = source.get('status') if source else 'absent'
+        return undetermined('not available (%s source is %s)' % (osd['build_source'], state))
+    rows = source.get('data')
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        return undetermined('not available (build evidence missing or ambiguous)')
+    build = _as_number(rows[0].get(osd['build_field']))
+    ubr = _as_number(rows[0].get(osd['ubr_field']))
+    if build is None:
+        return undetermined('not available (build number unreadable)')
+    full = '%d.%s' % (build, ubr if ubr is not None else 'unknown')
+    for family in osd['families']:
+        if family['min_build'] <= build <= family['max_build']:
+            # min_ubr 0 means the base build alone establishes the post-update platform
+            # (the whole family shipped after the update); a higher floor needs the UBR.
+            if family['min_ubr'] == 0 or (ubr is not None and ubr >= family['min_ubr']):
+                return make_test(**base, observed={'value': None, 'os_build': full, 'os_family': family['name'], 'default_basis': osd.get('kb')},
+                                 result=osd['secure_result'], interpretation=osd['secure_interpretation'] % full)
+            return undetermined(full)
+    return undetermined(full + ' (build does not map to a known OS family for this default)')
+
+
 def evaluate_rule(rule: dict[str, Any], sources: dict[str, dict[str, Any]], asset_id: str, site_id: str,
                   evidence_file: str, evidence_hash: str, timestamp: str) -> dict[str, Any]:
     source = sources.get(rule['source'])
@@ -317,6 +383,8 @@ def evaluate_rule(rule: dict[str, Any], sources: dict[str, dict[str, Any]], asse
     # the operating-system default applies. That is only ever interpreted when the
     # rule states the meaning explicitly, so no default is ever assumed silently.
     if observed is None:
+        if rule.get('absent_os_default') is not None:
+            return evaluate_absent_os_default(rule['absent_os_default'], sources, base)
         absent = rule.get('absent_means')
         if absent is None:
             return make_test(**base, observed=None, result='Unknown',
@@ -790,21 +858,38 @@ def import_wireless_controller(path: Path, engagement: str) -> tuple[list[dict[s
                              'Pass' if 'enterprise' in sec else 'Fail', {'ssid': ssid, 'security': sec},
                              'A corporate SSID should authenticate with 802.1X; a shared key is recoverable off any endpoint.'))
         if purpose == 'guest':
-            iso_result, iso_interp = tri_state(iso, 'client_isolation',
-                                               'Guest client isolation prevents guest devices reaching each other; absence enables lateral movement.')
-            tests.append(rec(f'{base}.isolation', f"Guest WLAN '{ssid}' enforces client isolation", iso_result,
+            # Configuration review only: these are controller settings, not an over-the-air
+            # enforcement test. The software-only lab has no adopted access point, so a Pass
+            # records that the setting is configured, never that client isolation or VLAN
+            # separation was verified on a radio against real clients.
+            if iso is True:
+                iso_result = 'Pass'
+                iso_interp = ('The controller configuration indicates client isolation is enabled for this guest WLAN. '
+                              'This is a configuration declaration read from the controller export, not a verified over-the-air test: '
+                              'no access point is adopted on this software-only controller, so client-to-client isolation was not '
+                              'exercised against real clients. Confirm enforcement on the live controller and radios before reporting it as effective.')
+            elif iso is False:
+                iso_result = 'Fail'
+                iso_interp = ('The controller configuration does not indicate client isolation for this guest WLAN, so the configuration '
+                              'permits guest devices to reach each other. This is a configuration observation, not an over-the-air test.')
+            else:
+                label = 'absent from the intake' if iso is None else 'recorded as %r' % (iso,)
+                iso_result = 'Unknown'
+                iso_interp = ('client_isolation is %s, so the guest isolation configuration cannot be determined from this intake; confirm it on the controller.' % label)
+            tests.append(rec(f'{base}.isolation', f"Guest WLAN '{ssid}' has client isolation enabled in the controller configuration", iso_result,
                              observed_with_note({'ssid': ssid, 'client_isolation': iso}, wlan_notes, 'client_isolation'), iso_interp))
             if isinstance(vlan, int) and not corp_known:
-                tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' VLAN separation from corporate", 'Unknown',
+                tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' has a VLAN ID configured separate from corporate", 'Unknown',
                                  {'ssid': ssid, 'vlan': vlan, 'corporate_vlans': sorted(corp_vlans), 'corporate_vlans_known': False},
-                                 'no corporate VLAN is recorded, so separation cannot be determined'))
+                                 'No corporate VLAN is recorded, so a separate guest VLAN ID cannot be confirmed.'))
             elif isinstance(vlan, int):
-                tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' is on a VLAN separate from corporate",
+                tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' has a VLAN ID configured separate from corporate",
                                  'Fail' if vlan in corp_vlans else 'Pass', {'ssid': ssid, 'vlan': vlan, 'corporate_vlans': sorted(corp_vlans)},
-                                 'A guest SSID sharing a corporate VLAN bridges untrusted devices into the corporate segment.'))
+                                 'The guest SSID is mapped to a different VLAN ID than the corporate SSID(s) in the controller configuration. '
+                                 'This is a configured VLAN mapping, not a verified inter-VLAN enforcement test; a guest SSID sharing a corporate VLAN would bridge untrusted devices into the corporate segment.'))
             else:
-                tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' VLAN separation from corporate", 'Unknown',
-                                 {'ssid': ssid, 'vlan': None}, 'No VLAN was recorded for this guest SSID, so separation cannot be determined.'))
+                tests.append(rec(f'{base}.vlan', f"Guest WLAN '{ssid}' has a VLAN ID configured separate from corporate", 'Unknown',
+                                 {'ssid': ssid, 'vlan': None}, 'No VLAN was recorded for this guest SSID, so a separate VLAN ID cannot be confirmed.'))
             if sec == 'wep' or 'psk' in sec or 'personal' in sec:
                 tests.append(rec(f'{base}.guestsec', f"Guest WLAN '{ssid}' uses a shared key ({sec})", 'Observation',
                                  {'ssid': ssid, 'security': sec},

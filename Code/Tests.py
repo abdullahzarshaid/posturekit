@@ -554,7 +554,7 @@ class Build20261001Tests(unittest.TestCase):
         self.assertFalse(d['corporate_vlans_known']); self.assertEqual(d['corporate_vlans'],[])
         tests,_=a.import_wireless_controller(out,'E'); by={t['test_id']:t for t in tests}
         self.assertEqual(by['CTRL.2.vlan']['result'],'Unknown')
-        self.assertEqual(by['CTRL.2.vlan']['technical_interpretation'],'no corporate VLAN is recorded, so separation cannot be determined')
+        self.assertEqual(by['CTRL.2.vlan']['technical_interpretation'],'No corporate VLAN is recorded, so a separate guest VLAN ID cannot be confirmed.')
         intake['wlans'][0]['vlan']=10; src=self._json('intake2.json',intake); out2=self.root/'ctrl2.json'
         self.assertEqual(self._run('WirelessControllerImport.py','--input',src,'--output',out2,'--engagement','E').returncode,0)
         self.assertTrue(json.loads(out2.read_text(encoding='utf-8'))['corporate_vlans_known'])
@@ -1664,6 +1664,83 @@ class Build20261002Tests(_RC2Fixtures, unittest.TestCase):
         f=tf._patch_finding(block,1)
         self.assertIn('3 vendor records: 1 CVE and 2 advisories (ADV990002, ADV990001)',f['description']); self.assertEqual(f['advisories'],['ADV990002','ADV990001'])
         self.assertIn('3 vendor records: 1 CVE and 2 advisories (ADV990002, ADV990001)',f['observed_result'])
+
+
+class PRN01OsDefaultTests(unittest.TestCase):
+    """PRN01 Point and Print (KB5005652, CVE-2021-34481): an absent value is the secure
+    administrator-only default only on a build at or after the August 10 2021 update.
+    The result is decided from the host's own patchlevel build evidence, never assumed;
+    an unknown build or an unreadable patchlevel source yields Unknown, not a safe default."""
+    @classmethod
+    def setUpClass(cls):
+        cls.rule=[r for r in a.load_rules(HERE/'Rules.json')['rules'] if r['id']=='PRN01'][0]
+    def _eval(self,spooler,restrict,build=None,ubr=None,pl='Collected',pp='Collected'):
+        src={'pointandprint':source('pointandprint',[{'SpoolerRunning':spooler,'RestrictDriverInstallationToAdministrators':restrict}],pp)}
+        if pl=='Collected' and build is not None:
+            src['patchlevel']=source('patchlevel',[{'CurrentBuild':str(build),'UBR':ubr}])
+        elif pl not in ('missing',):
+            src['patchlevel']=source('patchlevel',[],pl)
+        return a.evaluate_rule(self.rule,src,'A','S','Host.A.json','0'*64,'2026-10-06T00:00:00+00:00')
+    def test_shipped_rule_uses_os_default_not_fail(self):
+        self.assertIsNone(self.rule.get('absent_means')); self.assertIsNotNone(self.rule.get('absent_os_default'))
+    def test_win11_absent_is_secure_default_pass(self):
+        r=self._eval(1,None,26200,9457); self.assertEqual(r['result'],'Pass'); self.assertIn('KB5005652',r['technical_interpretation'])
+    def test_win10_22h2_absent_pass(self): self.assertEqual(self._eval(1,None,19045,3803)['result'],'Pass')
+    def test_win10_2004_at_floor_pass(self): self.assertEqual(self._eval(1,None,19041,1165)['result'],'Pass')
+    def test_win10_2004_below_floor_unknown(self): self.assertEqual(self._eval(1,None,19041,1164)['result'],'Unknown')
+    def test_pre2021_build_unknown(self): self.assertEqual(self._eval(1,None,18363,9999)['result'],'Unknown')
+    def test_srv2016_old_ubr_unknown(self): self.assertEqual(self._eval(1,None,14393,693)['result'],'Unknown')
+    def test_srv2016_at_floor_pass(self): self.assertEqual(self._eval(1,None,14393,4583)['result'],'Pass')
+    def test_srv2019_patched_pass(self): self.assertEqual(self._eval(1,None,17763,3650)['result'],'Pass')
+    def test_srv2019_below_floor_unknown(self): self.assertEqual(self._eval(1,None,17763,2113)['result'],'Unknown')
+    def test_srv2022_absent_pass(self): self.assertEqual(self._eval(1,None,20348,587)['result'],'Pass')
+    def test_explicit_zero_fail(self): self.assertEqual(self._eval(1,0,26200,9457)['result'],'Fail')
+    def test_explicit_one_pass(self): self.assertEqual(self._eval(1,1,26200,9457)['result'],'Pass')
+    def test_spooler_stopped_not_applicable(self): self.assertEqual(self._eval(0,None,26200,9457)['result'],'Not applicable')
+    def test_patchlevel_error_unknown(self): self.assertEqual(self._eval(1,None,26200,9457,pl='Error')['result'],'Unknown')
+    def test_patchlevel_partial_unknown(self): self.assertEqual(self._eval(1,None,26200,9457,pl='Partial')['result'],'Unknown')
+    def test_patchlevel_missing_unknown(self): self.assertEqual(self._eval(1,None,26200,9457,pl='missing')['result'],'Unknown')
+    def test_ubr_unknown_but_family_floor_zero_pass(self): self.assertEqual(self._eval(1,None,26200,None)['result'],'Pass')
+    def test_ubr_unknown_with_floor_unknown(self): self.assertEqual(self._eval(1,None,17763,None)['result'],'Unknown')
+    def test_pointandprint_provider_error_is_error(self): self.assertEqual(self._eval(1,None,26200,9457,pp='Error')['result'],'Error')
+    def test_rule_rejecting_both_absent_declarations(self):
+        bad={'schema_version':'1.0','profile_id':'X','rules':[dict(self.rule,absent_means={'result':'Fail','interpretation':'x'})]}
+        import tempfile,json as _j
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'r.json'; p.write_text(_j.dumps(bad),encoding='utf-8')
+            with self.assertRaises(ValueError): a.load_rules(p)
+
+
+class ControllerWordingTests(unittest.TestCase):
+    """A software-only controller with no adopted AP must not claim it 'enforces'
+    client isolation or verified VLAN separation. Pass means the setting is configured."""
+    def _run(self,wlan):
+        import tempfile,json as _j
+        doc={'schema_version':'1.0','tool_version':a.VERSION,'evidence_kind':'WirelessControllerConfig','engagement_id':'E',
+             'site_id':'LAB','source_position':'lab','normalized_utc':'2026-10-06T00:00:00+00:00',
+             'corporate_vlans':[20],'corporate_vlans_known':True,'controller':{},'wlans':[wlan]}
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'c.json'; p.write_text(_j.dumps(doc),encoding='utf-8')
+            return {t['test_id']:t for t in a.import_wireless_controller(p,'E')[0]}
+    def test_isolation_pass_is_configuration_not_enforcement(self):
+        by=self._run({'ssid':'G','purpose':'guest','security':'wpa2-psk','vlan':50,'client_isolation':True})
+        iso=by['CTRL.1.isolation']
+        self.assertEqual(iso['result'],'Pass')
+        self.assertNotIn('enforces',iso['objective'])
+        self.assertIn('configuration',iso['objective'])
+        self.assertIn('not a verified over-the-air test',iso['technical_interpretation'])
+    def test_vlan_pass_is_configured_mapping(self):
+        by=self._run({'ssid':'G','purpose':'guest','security':'wpa2-psk','vlan':50,'client_isolation':True})
+        vlan=by['CTRL.1.vlan']
+        self.assertEqual(vlan['result'],'Pass')
+        self.assertIn('VLAN ID configured separate',vlan['objective'])
+        self.assertIn('not a verified inter-VLAN enforcement test',vlan['technical_interpretation'])
+    def test_isolation_false_fails_as_configuration_observation(self):
+        by=self._run({'ssid':'G','purpose':'guest','security':'wpa2-psk','vlan':50,'client_isolation':False})
+        self.assertEqual(by['CTRL.1.isolation']['result'],'Fail')
+    def test_isolation_absent_is_unknown(self):
+        by=self._run({'ssid':'G','purpose':'guest','security':'wpa2-psk','vlan':50})
+        self.assertEqual(by['CTRL.1.isolation']['result'],'Unknown')
 
 
 if __name__=='__main__': unittest.main()

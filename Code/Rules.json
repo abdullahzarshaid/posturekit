@@ -739,11 +739,25 @@
       "field": "RestrictDriverInstallationToAdministrators",
       "type": "int",
       "expected": 1,
-      "basis": "Microsoft security baseline; confirm against the exact OS build before reporting",
+      "basis": "Microsoft KB5005652 (CVE-2021-34481); on a Windows build with the August 10 2021 Point and Print update or later installed, an absent value defaults to administrator-only driver installation. Confirm against the exact OS build before reporting.",
       "applicability": "Applies when the print spooler service is running; a stopped spooler is recorded as not applicable. Microsoft states that no combination of other mitigations is equivalent to this setting.",
-      "absent_means": {
-        "result": "Fail",
-        "interpretation": "No policy is configured, so non-administrators may install printer drivers, which execute with system privileges."
+      "absent_os_default": {
+        "kb": "KB5005652",
+        "cve": "CVE-2021-34481",
+        "build_source": "patchlevel",
+        "build_field": "CurrentBuild",
+        "ubr_field": "UBR",
+        "secure_result": "Pass",
+        "secure_interpretation": "The RestrictDriverInstallationToAdministrators value is not present. On a Windows build with the August 10 2021 Point and Print update (KB5005652, CVE-2021-34481) or later installed, an absent value defaults to requiring administrator privilege to install Point and Print drivers. The installed build (%s) is at or after that update for this operating system, so the absent value is the secure platform default, not a missing control. Confirm no other policy re-enables non-administrator driver installation before relying on this.",
+        "undetermined_interpretation": "The RestrictDriverInstallationToAdministrators value is not present, and the installed build (%s) could not be confirmed to be at or after the August 10 2021 Point and Print update (KB5005652) for this operating system, so the effective default cannot be determined from this evidence. Recorded as Unknown, not assumed; read the exact build and update state before reporting.",
+        "families": [
+          {"name": "Windows 11 or Server 2022/2025 (build 22000 and newer)", "min_build": 22000, "max_build": 999999, "min_ubr": 0},
+          {"name": "Windows Server 2022 (build 20348)", "min_build": 20348, "max_build": 20348, "min_ubr": 0},
+          {"name": "Windows 10 21H2/22H2 (build 19044/19045)", "min_build": 19044, "max_build": 19045, "min_ubr": 0},
+          {"name": "Windows 10 2004/20H2/21H1 (KB5005033, build 1165)", "min_build": 19041, "max_build": 19043, "min_ubr": 1165},
+          {"name": "Windows Server 2019 / 1809 (KB5005030, build 2114)", "min_build": 17763, "max_build": 17763, "min_ubr": 2114},
+          {"name": "Windows Server 2016 / 1607 (KB5005043, build 4583)", "min_build": 14393, "max_build": 14393, "min_ubr": 4583}
+        ]
       },
       "control_refs": [
         {

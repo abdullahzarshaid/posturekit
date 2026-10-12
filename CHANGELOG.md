@@ -2,6 +2,24 @@
 
 All notable changes to PostureKit. The schema version of the evidence files is unchanged (1.0), so batches collected with earlier 0.6 builds still analyze.
 
+## 0.6, build 2026-10-12
+
+Corrections to the host-configuration rules and the wireless-controller intake. Schema version 1.0, tool version 0.6 and the source and rule inventories are unchanged, so batches collected with earlier 0.6 builds still analyze. The Python suite in `Code/Tests.py` is now 225 tests.
+
+### OS-aware Point and Print evaluation (`Code/Rules.json`, `Code/Analyze.py`)
+- PRN01 no longer treats an absent `RestrictDriverInstallationToAdministrators` value as a Fail by default. Microsoft KB5005652 (CVE-2021-34481) changed the platform default: once the August 10 2021 Point and Print update is installed, an absent value means driver installation already requires administrator privilege. The rule now carries an `absent_os_default` block, and the analyzer reads the host's own patchlevel build (`CurrentBuild` and `UBR`) to decide the result against the version-specific secure default instead of recording a finding. A build at or after the update for its operating-system family records Pass as the secure default; a build that cannot be placed at or after the update, or a patchlevel source that is missing or unreadable, records Unknown with the reason rather than a Fail or an assumed Pass. An explicit 0 is still a Fail and an explicit 1 still a Pass, and the spooler gate is unchanged.
+- The rule loader now enforces that a rule declares at most one of `absent_means` or `absent_os_default`, and validates the build source, the interpretation placeholders and the per-family build floors.
+
+### Wireless-controller wording (`Code/Analyze.py`)
+- The guest-WLAN client-isolation and VLAN interpretations now read as configuration, not enforcement. A software-only controller with no adopted access point cannot demonstrate over-the-air behaviour, so a Pass records that the setting is configured in the controller export, and the text states that this is a configuration declaration, not a verified over-the-air or inter-VLAN enforcement test. The result values are unchanged.
+
+### SMB server-component InstallState (clarification, no code change)
+- The optional Windows feature collector already records InstallState 2 as Disabled (present but turned off) and 3 as Absent, in line with Microsoft's Win32_OptionalFeature definition. This is stated here for clarity; the SMB server-component handling is unchanged.
+
+### Regression tests (`Code/Tests.py`)
+- `PRN01OsDefaultTests` exercises the Point and Print branch across Windows 10, Windows 11 and Windows Server build families, the per-family update floors, an explicit 0 or 1, a stopped spooler, and missing, partial or unreadable build evidence, plus the loader rejecting a rule that declares both absence forms.
+- `ControllerWordingTests` confirms a configured guest WLAN reads as configuration rather than enforcement, and the existing corporate-VLAN-unknown assertion was updated to the new wording.
+
 ## 0.6, build 2026-10-02 release candidate 3
 
 Corrections from an independent delta review of release candidate 2. The Python suite is now 200 tests and the PowerShell fixture suite (`Code/CollectorHelperTests.ps1`) 97 checks. Schema version 1.0, tool version 0.6, the 45 sources and the 45 rules are unchanged; batches collected with earlier 0.6 builds still verify and report their own collector version.
