@@ -4,7 +4,7 @@
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Tests](https://img.shields.io/badge/tests-200%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-225%20passing-brightgreen.svg)
 ![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
 **Evidence-first, credentialed Windows and network security posture assessment.**
@@ -13,6 +13,10 @@ PostureKit reads a fixed set of security-relevant facts from authorized Windows 
 hashes for later integrity checks, and evaluates them against a transparent rule set. It also folds
 in adjacent planes (patch state, wireless configuration, and network vulnerability scans) through
 importers. It identifies and reports; it does not exploit, and it never assigns severity on its own.
+
+If you know HardeningKitty or PingCastle, PostureKit covers similar Windows and Active Directory
+security-configuration ground, for blue teams and assessors, with a hashed evidence trail behind every
+result and severity left to the analyst.
 
 ![Architecture](docs/architecture.png)
 
@@ -161,7 +165,7 @@ are the pattern to copy for a new one.
 python Code/Tests.py
 ```
 
-The Python suite (200 tests) runs on synthetic data only: no PowerShell is executed and no host is contacted.
+The Python suite (225 tests) runs on synthetic data only: no PowerShell is executed and no host is contacted.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File Code\CollectorHelperTests.ps1
