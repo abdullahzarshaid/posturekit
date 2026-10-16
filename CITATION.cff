@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If PostureKit contributes to research or an assessment write-up, please cite it as below."
+title: "PostureKit: evidence-first Windows, Active Directory and wireless security posture assessment"
+type: software
+version: "0.6"
+date-released: "2026-10-17"
+license: MIT
+repository-code: "https://github.com/abdullahzarshaid/posturekit"
+url: "https://abdullahzarshaid.github.io/posturekit/"
+authors:
+  - family-names: "Bin Zarshaid"
+    given-names: "Abdullah"
+    orcid: "https://orcid.org/0009-0000-8354-5177"
+keywords:
+  - security-assessment
+  - windows-security
+  - active-directory
+  - wireless-security
+  - evidence
+  - powershell
+  - python
+abstract: "PostureKit reads a fixed set of security-relevant facts from authorized Windows hosts, records SHA-256 hashes for later integrity checks, and evaluates the facts against a transparent rule set. Importers fold in patch state, wireless configuration and network vulnerability scans. It identifies and evidences; it does not exploit, and severity is left to the analyst."

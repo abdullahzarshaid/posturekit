@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PostureKit: evidence-first Windows, Active Directory and wireless posture assessment</title>
+<meta name="description" content="Open-source, credentialed security posture assessment for Windows hosts, Active Directory and wireless, with a SHA-256 evidence trail behind every result. PowerShell collector, Python analyzer, no dependencies.">
+<style>:root{--bg:#0b1220;--card:#121c2e;--ink:#e6edf3;--muted:#acbace;--acc:#59ddbe;--line:#26344a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:6vh 24px 48px}.eyebrow{letter-spacing:3px;font-size:12px;color:var(--acc);margin:0 0 10px}
+h1{font-size:clamp(30px,5vw,46px);line-height:1.15;margin:0 0 6px}h2.sub{font-weight:400;color:var(--muted);font-size:clamp(18px,2.6vw,24px);margin:0 0 18px}
+p.lead{max-width:800px;color:var(--muted)}.btns{display:flex;flex-wrap:wrap;gap:12px;margin:22px 0 10px}
+.button{display:inline-block;padding:13px 22px;border:1px solid var(--acc);border-radius:9px;color:var(--acc);text-decoration:none;font-weight:600}.button.primary{background:var(--acc);color:#07111a}.button:hover{filter:brightness(1.08)}
+.meta{color:var(--muted);font-size:14px;margin:6px 0 30px}h3{margin:38px 0 12px;font-size:22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;color:var(--ink)}.card small{display:block;color:var(--acc);font-size:12px;letter-spacing:2px;margin:0 0 4px}.card b{display:block;font-size:18px}
+.card span{color:var(--muted);font-size:14px;display:block;margin-top:6px}
+img.wide{width:100%;border:1px solid var(--line);border-radius:12px;display:block}p.cap{color:var(--muted);font-size:14px;margin:8px 0 0}
+pre{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;overflow:auto;font:14px/1.55 Consolas,"Cascadia Mono",Menlo,monospace;color:var(--ink);margin:0}pre .c{color:#8ea0b8}
+.note{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 20px;color:var(--muted);margin-top:28px}.note ul{margin:8px 0 0;padding-left:20px}
+footer{margin-top:44px;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);font-size:14px}footer a,.note a,p.cap a,.card a{color:var(--acc)}</style></head><body><div class="wrap">
+<p class="eyebrow">WINDOWS · ACTIVE DIRECTORY · WIRELESS · PATCH STATE · NETWORK</p>
+<h1>PostureKit</h1>
+<h2 class="sub">Evidence-first, credentialed security posture assessment with a hashed trail behind every result</h2>
+<p class="lead">PostureKit reads a fixed set of security-relevant facts from authorized Windows hosts, records their hashes for later integrity checks, and evaluates them against a transparent rule set. Importers fold in patch state, wireless configuration and network vulnerability scans. It identifies and reports; it does not exploit, and it never assigns severity on its own.</p>
+<div class="btns">
+  <a class="button primary" href="https://github.com/abdullahzarshaid/posturekit">Source on GitHub</a>
+  <a class="button" href="https://github.com/abdullahzarshaid/posturekit/releases/latest">Download the release</a>
+  <a class="button" href="https://abdullahzarshaid.github.io/network-security-assessment-handbook/handbook.html#p7">Read the full specification</a>
+  <a class="button" href="https://abdullahzarshaid.com/">Author site</a>
+</div>
+<p class="meta">MIT licensed · Windows PowerShell 5.1 collector · Python 3.10+ analyzer, standard library only · 225 Python tests and 97 PowerShell fixture checks run on every push · Version 0.6</p>
+<img class="wide" src="docs/demo.gif" alt="Terminal recording: the test suite passes, then the synthetic offline demonstration prints Pass, Fail and Unknown with a verified report manifest">
+<p class="cap">Typeset from a verified run of <code>python Code/Tests.py</code> and <code>python examples/offline_demo.py</code>. The demonstration uses synthetic data; no host or network is contacted.</p>
+<h3>How it works</h3>
+<img class="wide" src="docs/architecture.png" alt="PostureKit architecture: collect on the host, seal and verify the batch, analyze off the host, import other planes">
+<p class="cap">Collect with <code>Code/Run.ps1</code> (locally or over WinRM), seal each batch with a SHA-256 manifest, analyze with <code>Code/Analyze.py</code> against <code>Code/Rules.json</code>, and fold in patch, wireless and scan planes through the importers in <code>Extensions/</code>. Every result carries the control it relates to (NIST SP 800-53), the evidence pointer and its hash, the method and the outcome.</p>
+<h3>What it covers</h3>
+<div class="grid">
+  <div class="card"><small>PLANE 1</small><b>Windows host configuration</b><span>Firewall, SMB, RDP, UAC, LSA and credential protection, listening services and connections, installed software and updates, account and audit policy. 45 evidence sources, 45 rules.</span></div>
+  <div class="card"><small>PLANE 2</small><b>Active Directory</b><span>Domain policy, privileged groups with SIDs and members, trusts, Kerberos ticket policy read from SYSVOL, applied GPOs and directory identity, read from the domain controller.</span></div>
+  <div class="card"><small>PLANE 3</small><b>Wireless</b><span>Saved networks, encryption, cipher, auto-join, 802.1X server-certificate validation, PMF and pre-shared-key exposure, plus importers for over-the-air captures and controller configuration.</span></div>
+  <div class="card"><small>PLANE 4</small><b>Patch state</b><span>Missing Microsoft updates with vendor CVSS scores and CISA known-exploited flags, from an offline catalog and Microsoft's free feed. No commercial scanner licence.</span></div>
+  <div class="card"><small>PLANE 5</small><b>Network</b><span>Reachability and segmentation checks between vantage points, with liveness corroboration, and import of Greenbone/OpenVAS vulnerability reports as candidates an analyst confirms.</span></div>
+  <div class="card"><small>VALIDATED ON</small><b>Six-machine lab</b><span>Windows 10, Windows 11, Server 2016, 2019 and 2022 (member and domain controller), central collection over WinRM with Kerberos, a live Greenbone scan and a non-English client.</span></div>
+</div>
+<h3>Quick start</h3>
+<pre><span class="c"># Run the suites and the offline demonstration (synthetic data, no host contacted)</span>
+git clone https://github.com/abdullahzarshaid/posturekit.git
+cd posturekit
+python Code/Tests.py
+python examples/offline_demo.py
+
+<span class="c"># Authorized collection on a host named in your scope file (Windows PowerShell 5.1)</span>
+powershell -ExecutionPolicy Bypass -File Code\Run.ps1 -ScopePath scope.json -Mode Local -AssetId HOST01 -AuthorizedLabRun
+
+<span class="c"># Analyze the sealed batch off the host, optionally with other planes</span>
+python Code/Analyze.py --batch Evidence/Raw/&lt;batch-id&gt; --output Reports/HOST01
+python Code/Analyze.py --batch Evidence/Raw/&lt;batch-id&gt; --greenbone gvm.json --wireless-controller controller.json --output Reports/HOST01
+python Code/VerifyManifest.py Evidence/Raw/&lt;batch-id&gt;</pre>
+<div class="note"><b>What it does not do.</b>
+<ul>
+<li>It does not exploit, pivot or prove exploitability. It identifies and evidences configuration and patch weaknesses.</li>
+<li>It does not discover hosts. It only touches machines named in the scope, with authorization.</li>
+<li>A network scanner detects exposure, not confirmed exploitability, so scan results are treated as candidates an analyst confirms. Severity is always left to the analyst.</li>
+</ul>
+Part VII of the companion <a href="https://abdullahzarshaid.github.io/network-security-assessment-handbook/handbook.html#p7">Network Security Assessment Handbook</a> is the complete specification: design philosophy, the 45 sources and 45 rules, the patch engine, deployment adapters, evidence return and the validation status. Cite the tool with the repository's <code>CITATION.cff</code>.</div>
+<footer>Original work by <a href="https://abdullahzarshaid.com/">Abdullah Bin Zarshaid</a>. MIT licensed. Consultancy and training under <a href="https://abzsecure.com/">ABZSECURE</a>. Questions: <a href="mailto:abdullahbinzarshaid@gmail.com">abdullahbinzarshaid@gmail.com</a> or a GitHub issue with a synthetic, sanitized example, never live credentials or client evidence.</footer>
+</div></body></html>

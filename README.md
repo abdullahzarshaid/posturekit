@@ -4,7 +4,9 @@
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
-![Tests](https://img.shields.io/badge/tests-225%20passing-brightgreen.svg)
+[![Tests](https://github.com/abdullahzarshaid/posturekit/actions/workflows/tests.yml/badge.svg)](https://github.com/abdullahzarshaid/posturekit/actions/workflows/tests.yml)
+![Suite](https://img.shields.io/badge/suite-225%20Python%20%2B%2097%20PowerShell-blue.svg)
+[![Release](https://img.shields.io/github/v/release/abdullahzarshaid/posturekit?label=release&color=14314a)](https://github.com/abdullahzarshaid/posturekit/releases/latest)
 ![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
 **Evidence-first, credentialed Windows and network security posture assessment.**
@@ -29,6 +31,10 @@ result and severity left to the analyst.
 ## See it work without collecting from your computer
 
 Run `python examples/offline_demo.py` for a synthetic **Pass / Fail / Unknown** example using the real analyzer. It produces an HTML report and verifies its hashes; no host or network is contacted. [View the worked demonstration](examples/README.md).
+
+![Terminal recording of the test suite and the offline demonstration](docs/demo.gif)
+
+*Typeset from a verified run of the suite and the demonstration. Project page: [abdullahzarshaid.github.io/posturekit](https://abdullahzarshaid.github.io/posturekit/).*
 
 ---
 
@@ -97,6 +103,8 @@ cd posturekit
 python Code/Tests.py
 python -m unittest discover -s tests -v
 ```
+
+Prefer a fixed version? Download the zip attached to the [latest release](https://github.com/abdullahzarshaid/posturekit/releases/latest); its SHA-256 is printed in the release notes.
 
 These tests use synthetic fixtures and do not contact hosts. Actual collection below requires
 a reviewed scope file and authorization; use an asset identifier declared in that scope.
@@ -174,12 +182,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Code\CollectorHelperTests.ps
 The PowerShell fixture suite (97 checks) loads the pure wireless helpers out of `Collect.ps1` and runs them
 against fixture text. It needs Windows PowerShell 5.1 but no wireless adapter, no `netsh` call and no key.
 
+Both suites, the manifest tests and the offline demonstration run on GitHub Actions for every push and pull request, on Linux and Windows with Python 3.10 and 3.12 (`.github/workflows/tests.yml`).
+
 ## Contributing
 
 Issues and pull requests are welcome: new rule packs, additional importers, and coverage for more
 Windows versions are all good first contributions. Open an issue to discuss anything larger.
 
 If PostureKit is useful to you, a star helps others find it.
+
+## Cite
+
+Use the **Cite this repository** button on GitHub, or the entry in [CITATION.cff](CITATION.cff). The release tag is the version to cite.
 
 ## License
 
