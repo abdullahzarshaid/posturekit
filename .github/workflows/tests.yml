@@ -11,6 +11,12 @@ jobs:
     name: Python ${{ matrix.python }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    env:
+      # The hosted Windows runner's profile has an 8.3 short name (RUNNER~1) in TEMP, so a
+      # message that prints the resolved path and a test that expects the long path disagree.
+      # Point temp at the workspace temp directory, which has no short-name component.
+      TMP: ${{ runner.temp }}
+      TEMP: ${{ runner.temp }}
     strategy:
       fail-fast: false
       matrix:
