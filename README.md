@@ -1,5 +1,12 @@
 # PostureKit
 
+<p align="center">
+  <a href="https://abdullahzarshaid.com"><img src="docs/abz-logo.png" alt="Abdullah Bin Zarshaid" height="54"></a>
+</p>
+
+<p align="center"><a href="https://abdullahzarshaid.github.io/posturekit/"><b>Open the live project page</b></a></p>
+
+
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE.svg?logo=powershell&logoColor=white)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
